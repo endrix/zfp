@@ -969,7 +969,7 @@ zfp_stream_set_execution(zfp_stream* zfp, zfp_exec_policy policy)
         zfp->exec.params = NULL;
       }
       break;
-#ifdef ZFP_WITH_CUDA
+#if defined(ZFP_WITH_CUDA) || defined(ZFP_WITH_METAL)
     case zfp_exec_cuda:
       if (zfp->exec.policy != policy && zfp->exec.params != NULL) {
         free(zfp->exec.params);
@@ -1123,7 +1123,7 @@ zfp_compress(zfp_stream* zfp, const zfp_field* field)
 #endif
 
     /* CUDA */
-#ifdef ZFP_WITH_CUDA
+#if defined(ZFP_WITH_CUDA) || defined(ZFP_WITH_METAL)
     {{{ compress_cuda_int32_1,         compress_cuda_int64_1,         compress_cuda_float_1,         compress_cuda_double_1 },
       { compress_strided_cuda_int32_2, compress_strided_cuda_int64_2, compress_strided_cuda_float_2, compress_strided_cuda_double_2 },
       { compress_strided_cuda_int32_3, compress_strided_cuda_int64_3, compress_strided_cuda_float_3, compress_strided_cuda_double_3 },
@@ -1183,7 +1183,7 @@ zfp_decompress(zfp_stream* zfp, zfp_field* field)
     {{{ NULL }}},
 
     /* CUDA */
-#ifdef ZFP_WITH_CUDA
+#if defined(ZFP_WITH_CUDA) || defined(ZFP_WITH_METAL)
     {{{ decompress_cuda_int32_1,         decompress_cuda_int64_1,         decompress_cuda_float_1,         decompress_cuda_double_1 },
       { decompress_strided_cuda_int32_2, decompress_strided_cuda_int64_2, decompress_strided_cuda_float_2, decompress_strided_cuda_double_2 },
       { decompress_strided_cuda_int32_3, decompress_strided_cuda_int64_3, decompress_strided_cuda_float_3, decompress_strided_cuda_double_3 },

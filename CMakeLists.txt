@@ -136,6 +136,36 @@ set_property(CACHE ZFP_ROUNDING_MODE PROPERTY STRINGS "ZFP_ROUND_NEVER;ZFP_ROUND
 option(ZFP_WITH_DAZ "Treat subnormals as zero to avoid overflow" OFF)
 
 option(ZFP_WITH_CUDA "Enable CUDA parallel compression" OFF)
+option(ZFP_WITH_METAL "Enable Metal parallel compression" OFF)
+option(ZFP_WITH_MLX "Enable MLX wrapper build" OFF)
+option(ZFP_WITH_METAL_NATIVE "Enable experimental native Metal kernels" OFF)
+option(ZFP_WITH_METAL_CODEC_EXPERIMENTAL "Enable experimental native Metal codec kernels" OFF)
+
+if(ZFP_WITH_CUDA AND ZFP_WITH_METAL)
+  message(FATAL_ERROR "Enable only one GPU backend: ZFP_WITH_CUDA or ZFP_WITH_METAL")
+endif()
+
+if(ZFP_WITH_METAL)
+  if(NOT APPLE)
+    message(FATAL_ERROR "ZFP_WITH_METAL is supported only on Apple platforms")
+  endif()
+  if(NOT (ZFP_BIT_STREAM_WORD_SIZE EQUAL 64))
+    message(FATAL_ERROR "ZFP_WITH_METAL requires ZFP_BIT_STREAM_WORD_SIZE=64")
+  endif()
+  enable_language(OBJCXX)
+endif()
+
+if(ZFP_WITH_METAL_NATIVE AND NOT ZFP_WITH_METAL)
+  message(FATAL_ERROR "ZFP_WITH_METAL_NATIVE requires ZFP_WITH_METAL")
+endif()
+
+if(ZFP_WITH_METAL_CODEC_EXPERIMENTAL AND NOT ZFP_WITH_METAL_NATIVE)
+  message(FATAL_ERROR "ZFP_WITH_METAL_CODEC_EXPERIMENTAL requires ZFP_WITH_METAL_NATIVE")
+endif()
+
+if(ZFP_WITH_MLX AND NOT ZFP_WITH_METAL)
+  message(FATAL_ERROR "ZFP_WITH_MLX requires ZFP_WITH_METAL")
+endif()
 
 option(ZFP_WITH_BIT_STREAM_STRIDED "Enable strided access for progressive zfp streams" OFF)
 mark_as_advanced(ZFP_WITH_BIT_STREAM_STRIDED)

@@ -155,4 +155,27 @@ if(BUILD_TESTING_FULL)
   if(BUILD_ZFPY)
     add_subdirectory(python)
   endif()
+
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND)
+    add_custom_target(perf-summary
+      COMMAND ${Python3_EXECUTABLE} ${ZFP_SOURCE_DIR}/tests/perf/run_perf_suite.py
+        --build-dir ${ZFP_BINARY_DIR}
+        --repeats 5
+        --json-out ${ZFP_BINARY_DIR}/perf-summary.json
+      WORKING_DIRECTORY ${ZFP_SOURCE_DIR}
+      USES_TERMINAL
+      COMMENT "Run repeated perf suites and write perf-summary.json"
+    )
+
+    add_custom_target(perf-summary-quick
+      COMMAND ${Python3_EXECUTABLE} ${ZFP_SOURCE_DIR}/tests/perf/run_perf_suite.py
+        --build-dir ${ZFP_BINARY_DIR}
+        --repeats 3
+        --json-out ${ZFP_BINARY_DIR}/perf-summary-quick.json
+      WORKING_DIRECTORY ${ZFP_SOURCE_DIR}
+      USES_TERMINAL
+      COMMENT "Run quick repeated perf suites and write perf-summary-quick.json"
+    )
+  endif()
 endif()

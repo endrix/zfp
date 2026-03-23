@@ -33,7 +33,7 @@ function(zfp_add_test dims type bits)
   endif()
 
   if(NOT DEFINED ZFP_OMP_TESTS_ONLY)
-    if(ZFP_WITH_CUDA)
+    if(ZFP_WITH_CUDA OR ZFP_WITH_METAL)
       add_definitions(-DZFP_WITH_CUDA)
 
       set(cuda_test_name testZfpCuda${dims}d${type})

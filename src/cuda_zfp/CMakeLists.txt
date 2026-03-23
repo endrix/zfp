@@ -22,3 +22,5 @@ set(cuZFP_headers
     cuZFP.h
     ErrorCheck.h)
 
+set(cuZFP_sources ${cuZFP_sources} PARENT_SCOPE)
+set(cuZFP_headers ${cuZFP_headers} PARENT_SCOPE)

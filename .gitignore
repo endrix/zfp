@@ -1,7 +1,7 @@
 *.a
 *.o
 bin
-build
+build*
 lib
 dist
 wheelhouse
