@@ -1211,6 +1211,570 @@ kernel void zfp_decode3d_float(
   }
 }
 
+/* ========================================================================== */
+/* Int32 codec – integer path (no exponent, no quantization)                  */
+/* ========================================================================== */
+
+/* Encode a 1D block of 4 int32 values.
+   Integer path: lift → int2uint → bitplane encode.
+   No exponent header, no zero-block check. Full maxbits budget. */
+static inline void zfp_encode_block_1d_int32(thread int* iblock, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
+{
+  zfp_fwd_lift1(iblock);
+
+  uint ublock[4];
+  ublock[0] = zfp_int2uint(iblock[0]);
+  ublock[1] = zfp_int2uint(iblock[1]);
+  ublock[2] = zfp_int2uint(iblock[2]);
+  ublock[3] = zfp_int2uint(iblock[3]);
+
+  ZfpBlockWriter1 w = zfp_make_writer1(stream, maxbits, block_idx, atomic_mode);
+  uint bits = maxbits;
+  uint n = 0u;
+  for (uint k = 32u; bits && k-- > 0u;) {
+    ulong x = 0ul;
+    x += (ulong)((ublock[0] >> k) & 1u) << 0u;
+    x += (ulong)((ublock[1] >> k) & 1u) << 1u;
+    x += (ulong)((ublock[2] >> k) & 1u) << 2u;
+    x += (ulong)((ublock[3] >> k) & 1u) << 3u;
+    uint m = min(n, bits);
+    bits -= m;
+    x = zfp_writer_write_bits(w, x, m);
+    while (n < 4u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(3u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 3u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
+      }
+    }
+  }
+  zfp_writer_flush(w);
+}
+
+/* Decode a 1D block of 4 int32 values.
+   Integer path: bitplane decode → uint2int → inv_lift. No exponent. */
+static inline void zfp_decode_block_1d_int32(device const ulong* stream, uint maxbits, uint block_idx, thread int* out)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint bits = maxbits;
+
+  uint ublock[4] = {0u, 0u, 0u, 0u};
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 4u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(3u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 4u;
+        break;
+      }
+    }
+    ublock[0] += (uint)(x & 1ul) << k; x >>= 1u;
+    ublock[1] += (uint)(x & 1ul) << k; x >>= 1u;
+    ublock[2] += (uint)(x & 1ul) << k; x >>= 1u;
+    ublock[3] += (uint)(x & 1ul) << k;
+  }
+
+  out[0] = zfp_uint2int(ublock[0]);
+  out[1] = zfp_uint2int(ublock[1]);
+  out[2] = zfp_uint2int(ublock[2]);
+  out[3] = zfp_uint2int(ublock[3]);
+  zfp_inv_lift1(out);
+}
+
+/* Encode a 2D block of 16 int32 values. */
+static inline void zfp_encode_block_2d_int32(thread int* ib, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
+{
+  zfp_fwd_lift2_row(ib);
+  zfp_fwd_lift2_col(ib);
+
+  uint ub[16];
+  for (uint i = 0; i < 16; ++i)
+    ub[i] = zfp_int2uint(ib[zfp_perm2[i]]);
+
+  ZfpBlockWriter1 w = zfp_make_writer1(stream, maxbits, block_idx, atomic_mode);
+  uint bits = maxbits;
+  uint n = 0u;
+  for (uint k = 32u; bits && k-- > 0u;) {
+    ulong x = 0ul;
+    for (uint i = 0; i < 16; ++i)
+      x += (ulong)((ub[i] >> k) & 1u) << i;
+    uint m = min(n, bits);
+    bits -= m;
+    x = zfp_writer_write_bits(w, x, m);
+    while (n < 16u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(15u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 15u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
+      }
+    }
+  }
+  zfp_writer_flush(w);
+}
+
+/* Decode a 2D block of 16 int32 values. */
+static inline void zfp_decode_block_2d_int32(device const ulong* stream, uint maxbits, uint block_idx, thread int* out)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint bits = maxbits;
+
+  uint ub[16];
+  for (uint i = 0; i < 16; ++i)
+    ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 16u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(15u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 16u;
+        break;
+      }
+    }
+    for (uint i = 0; i < 16; ++i) {
+      ub[i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  for (uint i = 0; i < 16; ++i)
+    out[zfp_perm2[i]] = zfp_uint2int(ub[i]);
+
+  zfp_inv_lift2_col(out);
+  zfp_inv_lift2_row(out);
+}
+
+/* Encode a 3D block of 64 int32 values. */
+static inline void zfp_encode_block_3d_int32(thread int* ib, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
+{
+  zfp_fwd_lift3(ib);
+
+  uint ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = zfp_int2uint(ib[zfp_perm3[i]]);
+
+  ZfpBlockWriter1 w = zfp_make_writer1(stream, maxbits, block_idx, atomic_mode);
+  uint bits = maxbits;
+  uint n = 0u;
+  for (uint k = 32u; bits && k-- > 0u;) {
+    ulong x = 0ul;
+    for (uint i = 0; i < 64; ++i)
+      x += (ulong)((ub[i] >> k) & 1u) << i;
+    uint m = min(n, bits);
+    bits -= m;
+    x = zfp_writer_write_bits(w, x, m);
+    while (n < 64u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(63u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 63u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
+      }
+    }
+  }
+  zfp_writer_flush(w);
+}
+
+/* Decode a 3D block of 64 int32 values. */
+static inline void zfp_decode_block_3d_int32(device const ulong* stream, uint maxbits, uint block_idx, thread int* out)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint bits = maxbits;
+
+  uint ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    for (uint i = 0; i < 64; ++i) {
+      ub[i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  for (uint i = 0; i < 64; ++i)
+    out[zfp_perm3[i]] = zfp_uint2int(ub[i]);
+
+  zfp_inv_lift3(out);
+}
+
+/* ========================================================================== */
+/* Int32 kernel entry points                                                  */
+/* ========================================================================== */
+
+kernel void zfp_encode1d_int32(
+  device const int* src [[buffer(0)]],
+  device ulong* stream [[buffer(1)]],
+  constant Codec1dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+  bool atomic_mode = (p.maxbits & 31u) != 0u;
+
+  uint x = block_idx * 4u;
+  long offset = (long)x * (long)p.sx;
+  int iblock[4];
+
+  if (x + 4u > p.dim) {
+    uint nx = p.dim - x;
+    for (uint i = 0; i < 4u; ++i)
+      iblock[i] = i < nx ? src[offset + (long)i * (long)p.sx] : 0;
+    if (nx <= 1u) {
+      iblock[1] = iblock[0];
+      iblock[2] = iblock[1];
+      iblock[3] = iblock[0];
+    }
+    else if (nx == 2u) {
+      iblock[2] = iblock[1];
+      iblock[3] = iblock[0];
+    }
+    else if (nx == 3u) {
+      iblock[3] = iblock[0];
+    }
+  }
+  else {
+    iblock[0] = src[offset + 0l * (long)p.sx];
+    iblock[1] = src[offset + 1l * (long)p.sx];
+    iblock[2] = src[offset + 2l * (long)p.sx];
+    iblock[3] = src[offset + 3l * (long)p.sx];
+  }
+
+  zfp_encode_block_1d_int32(iblock, p.maxbits, block_idx, stream, atomic_mode);
+}
+
+kernel void zfp_decode1d_int32(
+  device const ulong* stream [[buffer(0)]],
+  device int* out [[buffer(1)]],
+  constant Codec1dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  int iblock[4];
+  zfp_decode_block_1d_int32(stream, p.maxbits, block_idx, iblock);
+
+  uint x = block_idx * 4u;
+  long offset = (long)x * (long)p.sx;
+  if (x + 4u > p.dim) {
+    uint nx = p.dim - x;
+    for (uint i = 0; i < nx; ++i)
+      out[offset + (long)i * (long)p.sx] = iblock[i];
+  }
+  else {
+    out[offset + 0l * (long)p.sx] = iblock[0];
+    out[offset + 1l * (long)p.sx] = iblock[1];
+    out[offset + 2l * (long)p.sx] = iblock[2];
+    out[offset + 3l * (long)p.sx] = iblock[3];
+  }
+}
+
+kernel void zfp_encode2d_int32(
+  device const int* src [[buffer(0)]],
+  device ulong* stream [[buffer(1)]],
+  constant Codec2dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+  bool atomic_mode = (p.maxbits & 31u) != 0u;
+
+  uint bx = block_idx % p.bx;
+  uint by = block_idx / p.bx;
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy;
+
+  int iblock[16];
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny) {
+    for (uint y = 0; y < 4u; ++y)
+      for (uint x = 0; x < 4u; ++x)
+        iblock[4u * y + x] = src[base + (long)x * p.sx + (long)y * p.sy];
+  }
+  else {
+    for (uint y = 0; y < 4u; ++y) {
+      for (uint x = 0; x < 4u; ++x) {
+        uint ax = x0 + x;
+        uint ay = y0 + y;
+        if (ax < p.nx && ay < p.ny)
+          iblock[4u * y + x] = src[base + (long)x * p.sx + (long)y * p.sy];
+        else
+          iblock[4u * y + x] = 0;
+      }
+    }
+
+    uint nx = x0 + 4u > p.nx ? p.nx - x0 : 4u;
+    uint ny = y0 + 4u > p.ny ? p.ny - y0 : 4u;
+    for (uint y = 0; y < 4u; ++y)
+      if (y < ny)
+        for (uint x = nx; x < 4u; ++x)
+          iblock[4u * y + x] = iblock[4u * y + nx - 1u];
+    for (uint x = 0; x < 4u; ++x)
+      for (uint y = ny; y < 4u; ++y)
+        iblock[4u * y + x] = iblock[4u * (ny - 1u) + x];
+  }
+
+  zfp_encode_block_2d_int32(iblock, p.maxbits, block_idx, stream, atomic_mode);
+}
+
+kernel void zfp_decode2d_int32(
+  device const ulong* stream [[buffer(0)]],
+  device int* dst [[buffer(1)]],
+  constant Codec2dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  uint bx = block_idx % p.bx;
+  uint by = block_idx / p.bx;
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy;
+
+  int iblock[16];
+  zfp_decode_block_2d_int32(stream, p.maxbits, block_idx, iblock);
+
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny) {
+    for (uint y = 0; y < 4u; ++y)
+      for (uint x = 0; x < 4u; ++x)
+        dst[base + (long)x * p.sx + (long)y * p.sy] = iblock[4u * y + x];
+  }
+  else {
+    for (uint y = 0; y < 4u; ++y)
+      for (uint x = 0; x < 4u; ++x)
+        if (x0 + x < p.nx && y0 + y < p.ny)
+          dst[base + (long)x * p.sx + (long)y * p.sy] = iblock[4u * y + x];
+  }
+}
+
+kernel void zfp_encode3d_int32(
+  device const int* src [[buffer(0)]],
+  device ulong* stream [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+  bool atomic_mode = (p.maxbits & 31u) != 0u;
+
+  uint bx = block_idx % p.bx;
+  uint by = (block_idx / p.bx) % p.by;
+  uint bz = block_idx / (p.bx * p.by);
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  uint z0 = bz * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz;
+
+  int iblock[64];
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint idx = x + 4u * (y + 4u * z);
+          iblock[idx] = src[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz];
+        }
+  }
+  else {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint ax = x0 + x;
+          uint ay = y0 + y;
+          uint az = z0 + z;
+          uint idx = x + 4u * (y + 4u * z);
+          if (ax < p.nx && ay < p.ny && az < p.nz)
+            iblock[idx] = src[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz];
+          else
+            iblock[idx] = 0;
+        }
+  }
+
+  zfp_encode_block_3d_int32(iblock, p.maxbits, block_idx, stream, atomic_mode);
+}
+
+kernel void zfp_decode3d_int32(
+  device const ulong* stream [[buffer(0)]],
+  device int* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  uint bx = block_idx % p.bx;
+  uint by = (block_idx / p.bx) % p.by;
+  uint bz = block_idx / (p.bx * p.by);
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  uint z0 = bz * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz;
+
+  int iblock[64];
+  zfp_decode_block_3d_int32(stream, p.maxbits, block_idx, iblock);
+
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint idx = x + 4u * (y + 4u * z);
+          dst[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz] = iblock[idx];
+        }
+  }
+  else {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x)
+          if (x0 + x < p.nx && y0 + y < p.ny && z0 + z < p.nz) {
+            uint idx = x + 4u * (y + 4u * z);
+            dst[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz] = iblock[idx];
+          }
+  }
+}
+
 #define ZFP_DEFINE_RATE_KERNELS_1D(RATE) \
 kernel void zfp_encode1d_float_r##RATE( \
   device const float* in [[buffer(0)]], \
