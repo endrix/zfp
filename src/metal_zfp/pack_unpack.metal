@@ -565,8 +565,32 @@ static inline void zfp_encode_block_1d_float(thread float* fblock, uint maxbits,
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
-    for (; n < 4u && bits && (bits--, zfp_writer_write_bit(w, x ? 1u : 0u)); x >>= 1u, n++) {
-      for (; n < 3u && bits && (bits--, !zfp_writer_write_bit(w, (uint)(x & 1ul))); x >>= 1u, n++) {
+    while (n < 4u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(3u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 3u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
       }
     }
   }
@@ -664,8 +688,32 @@ static inline void zfp_encode_block_2d_float(thread float* fblock, uint maxbits,
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
-    for (; n < 16u && bits && (bits--, zfp_writer_write_bit(w, x ? 1u : 0u)); x >>= 1u, n++) {
-      for (; n < 15u && bits && (bits--, !zfp_writer_write_bit(w, (uint)(x & 1ul))); x >>= 1u, n++) {
+    while (n < 16u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(15u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 15u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
       }
     }
   }
