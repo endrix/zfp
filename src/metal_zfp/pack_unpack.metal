@@ -507,6 +507,38 @@ static inline uint zfp_reader_read_bit(thread ZfpBlockReader1& r)
   return b;
 }
 
+/* Peek at the next 'count' bits without consuming them.
+   count must be <= 64 and <= remaining bits in buffer + next word. */
+static inline ulong zfp_reader_peek_bits(thread ZfpBlockReader1& r, uint count)
+{
+  if (count == 0u) return 0ul;
+  uint rem = 64u - r.current_bit;
+  if (count <= rem) {
+    ulong mask = (count >= 64u) ? ~0ul : ((1ul << count) - 1ul);
+    return r.buffer & mask;
+  }
+  /* Need bits from next word too */
+  ulong lo = r.buffer; /* rem bits available */
+  ulong hi = r.words[1];
+  uint hi_bits = count - rem;
+  ulong hi_mask = (hi_bits >= 64u) ? ~0ul : ((1ul << hi_bits) - 1ul);
+  return lo | ((hi & hi_mask) << rem);
+}
+
+/* Skip (consume) 'count' bits that were already peeked at. */
+static inline void zfp_reader_skip(thread ZfpBlockReader1& r, uint count)
+{
+  r.current_bit += count;
+  if (r.current_bit >= 64u) {
+    r.words += 1;
+    r.buffer = r.words[0];
+    r.current_bit -= 64u;
+    r.buffer >>= r.current_bit;
+  } else {
+    r.buffer >>= count;
+  }
+}
+
 static inline ulong zfp_reader_read_bits(thread ZfpBlockReader1& r, uint nbits)
 {
   uint rem = 64u - r.current_bit;
@@ -620,10 +652,20 @@ static inline void zfp_decode_block_1d_float(device const ulong* stream, uint ma
     for (; bits && n < 4u; n++, m = n) {
       bits--;
       if (zfp_reader_read_bit(r)) {
-        for (; bits && n < 3u; n++) {
-          bits--;
-          if (zfp_reader_read_bit(r))
-            break;
+        uint inner_max = min(3u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
         }
         x += 1ul << n;
       }
@@ -747,10 +789,20 @@ static inline void zfp_decode_block_2d_float(device const ulong* stream, uint ma
     for (; bits && n < 16u; n++, m = n) {
       bits--;
       if (zfp_reader_read_bit(r)) {
-        for (; bits && n < 15u; n++) {
-          bits--;
-          if (zfp_reader_read_bit(r))
-            break;
+        uint inner_max = min(15u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
         }
         x += 1ul << n;
       }
@@ -876,10 +928,22 @@ static inline void zfp_decode_block_3d_float(device const ulong* stream, uint ma
     for (; bits && n < 64u; n++, m = n) {
       bits--;
       if (zfp_reader_read_bit(r)) {
-        for (; bits && n < 63u; n++) {
-          bits--;
-          if (zfp_reader_read_bit(r))
-            break;
+        /* Group test passed: find next significant coefficient */
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            /* Found: consume the '1' bit */
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
         }
         x += 1ul << n;
       }
