@@ -376,6 +376,150 @@ static inline void zfp_inv_lift3(thread int* p)
       zfp_inv_lift1(p + 4u * y + 16u * z);
 }
 
+/* ========================================================================== */
+/* 64-bit integer helpers for int64 codec                                     */
+/* ========================================================================== */
+
+static inline ulong zfp_int2uint_long(long x)
+{
+  return (ulong)((x + (long)0xaaaaaaaaaaaaaaaaul) ^ (long)0xaaaaaaaaaaaaaaaaul);
+}
+
+static inline long zfp_uint2int_long(ulong x)
+{
+  return (long)((x ^ 0xaaaaaaaaaaaaaaaaul) - 0xaaaaaaaaaaaaaaaaul);
+}
+
+static inline void zfp_fwd_lift1_long(thread long* p)
+{
+  long x = p[0];
+  long y = p[1];
+  long z = p[2];
+  long w = p[3];
+  x += w; x >>= 1; w -= x;
+  z += y; z >>= 1; y -= z;
+  x += z; x >>= 1; z -= x;
+  w += y; w >>= 1; y -= w;
+  w += y >> 1; y -= w >> 1;
+  p[0] = x;
+  p[1] = y;
+  p[2] = z;
+  p[3] = w;
+}
+
+static inline void zfp_inv_lift1_long(thread long* p)
+{
+  long x = p[0];
+  long y = p[1];
+  long z = p[2];
+  long w = p[3];
+  y += w >> 1; w -= y >> 1;
+  y += w; w -= y - w;
+  z += x; x -= z - x;
+  y += z; z -= y - z;
+  w += x; x -= w - x;
+  p[0] = x;
+  p[1] = y;
+  p[2] = z;
+  p[3] = w;
+}
+
+static inline void zfp_fwd_lift2_row_long(thread long* p)
+{
+  zfp_fwd_lift1_long(p + 0);
+  zfp_fwd_lift1_long(p + 4);
+  zfp_fwd_lift1_long(p + 8);
+  zfp_fwd_lift1_long(p + 12);
+}
+
+static inline void zfp_fwd_lift2_col_long(thread long* p)
+{
+  long c0[4] = { p[0], p[4], p[8], p[12] };
+  long c1[4] = { p[1], p[5], p[9], p[13] };
+  long c2[4] = { p[2], p[6], p[10], p[14] };
+  long c3[4] = { p[3], p[7], p[11], p[15] };
+  zfp_fwd_lift1_long(c0); zfp_fwd_lift1_long(c1); zfp_fwd_lift1_long(c2); zfp_fwd_lift1_long(c3);
+  p[0] = c0[0]; p[4] = c0[1]; p[8] = c0[2]; p[12] = c0[3];
+  p[1] = c1[0]; p[5] = c1[1]; p[9] = c1[2]; p[13] = c1[3];
+  p[2] = c2[0]; p[6] = c2[1]; p[10] = c2[2]; p[14] = c2[3];
+  p[3] = c3[0]; p[7] = c3[1]; p[11] = c3[2]; p[15] = c3[3];
+}
+
+static inline void zfp_inv_lift2_col_long(thread long* p)
+{
+  long c0[4] = { p[0], p[4], p[8], p[12] };
+  long c1[4] = { p[1], p[5], p[9], p[13] };
+  long c2[4] = { p[2], p[6], p[10], p[14] };
+  long c3[4] = { p[3], p[7], p[11], p[15] };
+  zfp_inv_lift1_long(c0); zfp_inv_lift1_long(c1); zfp_inv_lift1_long(c2); zfp_inv_lift1_long(c3);
+  p[0] = c0[0]; p[4] = c0[1]; p[8] = c0[2]; p[12] = c0[3];
+  p[1] = c1[0]; p[5] = c1[1]; p[9] = c1[2]; p[13] = c1[3];
+  p[2] = c2[0]; p[6] = c2[1]; p[10] = c2[2]; p[14] = c2[3];
+  p[3] = c3[0]; p[7] = c3[1]; p[11] = c3[2]; p[15] = c3[3];
+}
+
+static inline void zfp_inv_lift2_row_long(thread long* p)
+{
+  zfp_inv_lift1_long(p + 0);
+  zfp_inv_lift1_long(p + 4);
+  zfp_inv_lift1_long(p + 8);
+  zfp_inv_lift1_long(p + 12);
+}
+
+static inline void zfp_fwd_lift3_long(thread long* p)
+{
+  for (uint z = 0; z < 4u; ++z)
+    for (uint y = 0; y < 4u; ++y)
+      zfp_fwd_lift1_long(p + 4u * y + 16u * z);
+
+  for (uint x = 0; x < 4u; ++x)
+    for (uint z = 0; z < 4u; ++z) {
+      long c[4] = { p[16u * z + 1u * x], p[16u * z + 4u + 1u * x], p[16u * z + 8u + 1u * x], p[16u * z + 12u + 1u * x] };
+      zfp_fwd_lift1_long(c);
+      p[16u * z + 1u * x] = c[0];
+      p[16u * z + 4u + 1u * x] = c[1];
+      p[16u * z + 8u + 1u * x] = c[2];
+      p[16u * z + 12u + 1u * x] = c[3];
+    }
+
+  for (uint y = 0; y < 4u; ++y)
+    for (uint x = 0; x < 4u; ++x) {
+      long c[4] = { p[1u * x + 4u * y], p[16u + 1u * x + 4u * y], p[32u + 1u * x + 4u * y], p[48u + 1u * x + 4u * y] };
+      zfp_fwd_lift1_long(c);
+      p[1u * x + 4u * y] = c[0];
+      p[16u + 1u * x + 4u * y] = c[1];
+      p[32u + 1u * x + 4u * y] = c[2];
+      p[48u + 1u * x + 4u * y] = c[3];
+    }
+}
+
+static inline void zfp_inv_lift3_long(thread long* p)
+{
+  for (uint y = 0; y < 4u; ++y)
+    for (uint x = 0; x < 4u; ++x) {
+      long c[4] = { p[1u * x + 4u * y], p[16u + 1u * x + 4u * y], p[32u + 1u * x + 4u * y], p[48u + 1u * x + 4u * y] };
+      zfp_inv_lift1_long(c);
+      p[1u * x + 4u * y] = c[0];
+      p[16u + 1u * x + 4u * y] = c[1];
+      p[32u + 1u * x + 4u * y] = c[2];
+      p[48u + 1u * x + 4u * y] = c[3];
+    }
+
+  for (uint x = 0; x < 4u; ++x)
+    for (uint z = 0; z < 4u; ++z) {
+      long c[4] = { p[16u * z + 1u * x], p[16u * z + 4u + 1u * x], p[16u * z + 8u + 1u * x], p[16u * z + 12u + 1u * x] };
+      zfp_inv_lift1_long(c);
+      p[16u * z + 1u * x] = c[0];
+      p[16u * z + 4u + 1u * x] = c[1];
+      p[16u * z + 8u + 1u * x] = c[2];
+      p[16u * z + 12u + 1u * x] = c[3];
+    }
+
+  for (uint z = 0; z < 4u; ++z)
+    for (uint y = 0; y < 4u; ++y)
+      zfp_inv_lift1_long(p + 4u * y + 16u * z);
+}
+
 struct ZfpBlockWriter1 {
   device ulong* stream64;
   device atomic_uint* stream_atomic;
@@ -1755,6 +1899,567 @@ kernel void zfp_decode3d_int32(
 
   int iblock[64];
   zfp_decode_block_3d_int32(stream, p.maxbits, block_idx, iblock);
+
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint idx = x + 4u * (y + 4u * z);
+          dst[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz] = iblock[idx];
+        }
+  }
+  else {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x)
+          if (x0 + x < p.nx && y0 + y < p.ny && z0 + z < p.nz) {
+            uint idx = x + 4u * (y + 4u * z);
+            dst[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz] = iblock[idx];
+          }
+  }
+}
+
+/* ========================================================================== */
+/* Int64 block encode/decode functions                                        */
+/* ========================================================================== */
+
+/* Encode a 1D block of 4 int64 values. */
+static inline void zfp_encode_block_1d_int64(thread long* iblock, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
+{
+  zfp_fwd_lift1_long(iblock);
+
+  ulong ublock[4];
+  ublock[0] = zfp_int2uint_long(iblock[0]);
+  ublock[1] = zfp_int2uint_long(iblock[1]);
+  ublock[2] = zfp_int2uint_long(iblock[2]);
+  ublock[3] = zfp_int2uint_long(iblock[3]);
+
+  ZfpBlockWriter1 w = zfp_make_writer1(stream, maxbits, block_idx, atomic_mode);
+  uint bits = maxbits;
+  uint n = 0u;
+  for (uint k = 64u; bits && k-- > 0u;) {
+    ulong x = 0ul;
+    x += (ulong)((ublock[0] >> k) & 1ul) << 0u;
+    x += (ulong)((ublock[1] >> k) & 1ul) << 1u;
+    x += (ulong)((ublock[2] >> k) & 1ul) << 2u;
+    x += (ulong)((ublock[3] >> k) & 1ul) << 3u;
+    uint m = min(n, bits);
+    bits -= m;
+    x = zfp_writer_write_bits(w, x, m);
+    while (n < 4u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(3u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 3u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
+      }
+    }
+  }
+  zfp_writer_flush(w);
+}
+
+/* Decode a 1D block of 4 int64 values. */
+static inline void zfp_decode_block_1d_int64(device const ulong* stream, uint maxbits, uint block_idx, thread long* out)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint bits = maxbits;
+
+  ulong ublock[4] = {0ul, 0ul, 0ul, 0ul};
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 64u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 4u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(3u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 4u;
+        break;
+      }
+    }
+    ublock[0] += (ulong)(x & 1ul) << k; x >>= 1u;
+    ublock[1] += (ulong)(x & 1ul) << k; x >>= 1u;
+    ublock[2] += (ulong)(x & 1ul) << k; x >>= 1u;
+    ublock[3] += (ulong)(x & 1ul) << k;
+  }
+
+  out[0] = zfp_uint2int_long(ublock[0]);
+  out[1] = zfp_uint2int_long(ublock[1]);
+  out[2] = zfp_uint2int_long(ublock[2]);
+  out[3] = zfp_uint2int_long(ublock[3]);
+  zfp_inv_lift1_long(out);
+}
+
+/* Encode a 2D block of 16 int64 values. */
+static inline void zfp_encode_block_2d_int64(thread long* ib, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
+{
+  zfp_fwd_lift2_row_long(ib);
+  zfp_fwd_lift2_col_long(ib);
+
+  ulong ub[16];
+  for (uint i = 0; i < 16; ++i)
+    ub[i] = zfp_int2uint_long(ib[zfp_perm2[i]]);
+
+  ZfpBlockWriter1 w = zfp_make_writer1(stream, maxbits, block_idx, atomic_mode);
+  uint bits = maxbits;
+  uint n = 0u;
+  for (uint k = 64u; bits && k-- > 0u;) {
+    ulong x = 0ul;
+    for (uint i = 0; i < 16; ++i)
+      x += (ulong)((ub[i] >> k) & 1ul) << i;
+    uint m = min(n, bits);
+    bits -= m;
+    x = zfp_writer_write_bits(w, x, m);
+    while (n < 16u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(15u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 15u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
+      }
+    }
+  }
+  zfp_writer_flush(w);
+}
+
+/* Decode a 2D block of 16 int64 values. */
+static inline void zfp_decode_block_2d_int64(device const ulong* stream, uint maxbits, uint block_idx, thread long* out)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint bits = maxbits;
+
+  ulong ub[16];
+  for (uint i = 0; i < 16; ++i)
+    ub[i] = 0ul;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 64u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 16u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(15u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 16u;
+        break;
+      }
+    }
+    for (uint i = 0; i < 16; ++i) {
+      ub[i] += (ulong)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  for (uint i = 0; i < 16; ++i)
+    out[zfp_perm2[i]] = zfp_uint2int_long(ub[i]);
+
+  zfp_inv_lift2_col_long(out);
+  zfp_inv_lift2_row_long(out);
+}
+
+/* Encode a 3D block of 64 int64 values. */
+static inline void zfp_encode_block_3d_int64(thread long* ib, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
+{
+  zfp_fwd_lift3_long(ib);
+
+  ulong ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = zfp_int2uint_long(ib[zfp_perm3[i]]);
+
+  ZfpBlockWriter1 w = zfp_make_writer1(stream, maxbits, block_idx, atomic_mode);
+  uint bits = maxbits;
+  uint n = 0u;
+  for (uint k = 64u; bits && k-- > 0u;) {
+    ulong x = 0ul;
+    for (uint i = 0; i < 64; ++i)
+      x += (ulong)((ub[i] >> k) & 1ul) << i;
+    uint m = min(n, bits);
+    bits -= m;
+    x = zfp_writer_write_bits(w, x, m);
+    while (n < 64u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u);
+      uint z = (uint)ctz(x);
+      uint inner_max = min(63u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        if (z < 63u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        x >>= run;
+        n += run;
+        x >>= 1u;
+        n++;
+      }
+    }
+  }
+  zfp_writer_flush(w);
+}
+
+/* Decode a 3D block of 64 int64 values. */
+static inline void zfp_decode_block_3d_int64(device const ulong* stream, uint maxbits, uint block_idx, thread long* out)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint bits = maxbits;
+
+  ulong ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = 0ul;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 64u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    for (uint i = 0; i < 64; ++i) {
+      ub[i] += (ulong)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  for (uint i = 0; i < 64; ++i)
+    out[zfp_perm3[i]] = zfp_uint2int_long(ub[i]);
+
+  zfp_inv_lift3_long(out);
+}
+
+/* ========================================================================== */
+/* Int64 kernel entry points                                                  */
+/* ========================================================================== */
+
+kernel void zfp_encode1d_int64(
+  device const long* src [[buffer(0)]],
+  device ulong* stream [[buffer(1)]],
+  constant Codec1dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+  bool atomic_mode = (p.maxbits & 31u) != 0u;
+
+  uint x = block_idx * 4u;
+  long offset = (long)x * (long)p.sx;
+  long iblock[4];
+
+  if (x + 4u > p.dim) {
+    uint nx = p.dim - x;
+    for (uint i = 0; i < 4u; ++i)
+      iblock[i] = i < nx ? src[offset + (long)i * (long)p.sx] : 0l;
+    if (nx <= 1u) {
+      iblock[1] = iblock[0];
+      iblock[2] = iblock[1];
+      iblock[3] = iblock[0];
+    }
+    else if (nx == 2u) {
+      iblock[2] = iblock[1];
+      iblock[3] = iblock[0];
+    }
+    else if (nx == 3u) {
+      iblock[3] = iblock[0];
+    }
+  }
+  else {
+    iblock[0] = src[offset + 0l * (long)p.sx];
+    iblock[1] = src[offset + 1l * (long)p.sx];
+    iblock[2] = src[offset + 2l * (long)p.sx];
+    iblock[3] = src[offset + 3l * (long)p.sx];
+  }
+
+  zfp_encode_block_1d_int64(iblock, p.maxbits, block_idx, stream, atomic_mode);
+}
+
+kernel void zfp_decode1d_int64(
+  device const ulong* stream [[buffer(0)]],
+  device long* out [[buffer(1)]],
+  constant Codec1dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  long iblock[4];
+  zfp_decode_block_1d_int64(stream, p.maxbits, block_idx, iblock);
+
+  uint x = block_idx * 4u;
+  long offset = (long)x * (long)p.sx;
+  if (x + 4u > p.dim) {
+    uint nx = p.dim - x;
+    for (uint i = 0; i < nx; ++i)
+      out[offset + (long)i * (long)p.sx] = iblock[i];
+  }
+  else {
+    out[offset + 0l * (long)p.sx] = iblock[0];
+    out[offset + 1l * (long)p.sx] = iblock[1];
+    out[offset + 2l * (long)p.sx] = iblock[2];
+    out[offset + 3l * (long)p.sx] = iblock[3];
+  }
+}
+
+kernel void zfp_encode2d_int64(
+  device const long* src [[buffer(0)]],
+  device ulong* stream [[buffer(1)]],
+  constant Codec2dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+  bool atomic_mode = (p.maxbits & 31u) != 0u;
+
+  uint bx = block_idx % p.bx;
+  uint by = block_idx / p.bx;
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy;
+
+  long iblock[16];
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny) {
+    for (uint y = 0; y < 4u; ++y)
+      for (uint x = 0; x < 4u; ++x)
+        iblock[4u * y + x] = src[base + (long)x * p.sx + (long)y * p.sy];
+  }
+  else {
+    for (uint y = 0; y < 4u; ++y) {
+      for (uint x = 0; x < 4u; ++x) {
+        uint ax = x0 + x;
+        uint ay = y0 + y;
+        if (ax < p.nx && ay < p.ny)
+          iblock[4u * y + x] = src[base + (long)x * p.sx + (long)y * p.sy];
+        else
+          iblock[4u * y + x] = 0l;
+      }
+    }
+
+    uint nx = x0 + 4u > p.nx ? p.nx - x0 : 4u;
+    uint ny = y0 + 4u > p.ny ? p.ny - y0 : 4u;
+    for (uint y = 0; y < 4u; ++y)
+      if (y < ny)
+        for (uint x = nx; x < 4u; ++x)
+          iblock[4u * y + x] = iblock[4u * y + nx - 1u];
+    for (uint x = 0; x < 4u; ++x)
+      for (uint y = ny; y < 4u; ++y)
+        iblock[4u * y + x] = iblock[4u * (ny - 1u) + x];
+  }
+
+  zfp_encode_block_2d_int64(iblock, p.maxbits, block_idx, stream, atomic_mode);
+}
+
+kernel void zfp_decode2d_int64(
+  device const ulong* stream [[buffer(0)]],
+  device long* dst [[buffer(1)]],
+  constant Codec2dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  uint bx = block_idx % p.bx;
+  uint by = block_idx / p.bx;
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy;
+
+  long iblock[16];
+  zfp_decode_block_2d_int64(stream, p.maxbits, block_idx, iblock);
+
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny) {
+    for (uint y = 0; y < 4u; ++y)
+      for (uint x = 0; x < 4u; ++x)
+        dst[base + (long)x * p.sx + (long)y * p.sy] = iblock[4u * y + x];
+  }
+  else {
+    for (uint y = 0; y < 4u; ++y)
+      for (uint x = 0; x < 4u; ++x)
+        if (x0 + x < p.nx && y0 + y < p.ny)
+          dst[base + (long)x * p.sx + (long)y * p.sy] = iblock[4u * y + x];
+  }
+}
+
+kernel void zfp_encode3d_int64(
+  device const long* src [[buffer(0)]],
+  device ulong* stream [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+  bool atomic_mode = (p.maxbits & 31u) != 0u;
+
+  uint bx = block_idx % p.bx;
+  uint by = (block_idx / p.bx) % p.by;
+  uint bz = block_idx / (p.bx * p.by);
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  uint z0 = bz * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz;
+
+  long iblock[64];
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint idx = x + 4u * (y + 4u * z);
+          iblock[idx] = src[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz];
+        }
+  }
+  else {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint ax = x0 + x;
+          uint ay = y0 + y;
+          uint az = z0 + z;
+          uint idx = x + 4u * (y + 4u * z);
+          if (ax < p.nx && ay < p.ny && az < p.nz)
+            iblock[idx] = src[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz];
+          else
+            iblock[idx] = 0l;
+        }
+  }
+
+  zfp_encode_block_3d_int64(iblock, p.maxbits, block_idx, stream, atomic_mode);
+}
+
+kernel void zfp_decode3d_int64(
+  device const ulong* stream [[buffer(0)]],
+  device long* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  uint bx = block_idx % p.bx;
+  uint by = (block_idx / p.bx) % p.by;
+  uint bz = block_idx / (p.bx * p.by);
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  uint z0 = bz * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz;
+
+  long iblock[64];
+  zfp_decode_block_3d_int64(stream, p.maxbits, block_idx, iblock);
 
   if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
     for (uint z = 0; z < 4u; ++z)

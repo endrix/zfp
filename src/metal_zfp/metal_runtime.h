@@ -213,6 +213,57 @@ size_t zfp_metal_decode3d_int32_runtime(const void* stream_words,
                                         unsigned int maxbits,
                                         int* dst);
 
+size_t zfp_metal_encode1d_int64_runtime(const long* src,
+                                        unsigned int dim,
+                                        int sx,
+                                        unsigned int maxbits,
+                                        void* stream_words,
+                                        size_t stream_capacity_bytes);
+
+size_t zfp_metal_decode1d_int64_runtime(const void* stream_words,
+                                        unsigned int dim,
+                                        int sx,
+                                        unsigned int maxbits,
+                                        long* dst);
+
+size_t zfp_metal_encode2d_int64_runtime(const long* src,
+                                        unsigned int nx,
+                                        unsigned int ny,
+                                        ptrdiff_t sx,
+                                        ptrdiff_t sy,
+                                        unsigned int maxbits,
+                                        void* stream_words,
+                                        size_t stream_capacity_bytes);
+
+size_t zfp_metal_decode2d_int64_runtime(const void* stream_words,
+                                        unsigned int nx,
+                                        unsigned int ny,
+                                        ptrdiff_t sx,
+                                        ptrdiff_t sy,
+                                        unsigned int maxbits,
+                                        long* dst);
+
+size_t zfp_metal_encode3d_int64_runtime(const long* src,
+                                        unsigned int nx,
+                                        unsigned int ny,
+                                        unsigned int nz,
+                                        ptrdiff_t sx,
+                                        ptrdiff_t sy,
+                                        ptrdiff_t sz,
+                                        unsigned int maxbits,
+                                        void* stream_words,
+                                        size_t stream_capacity_bytes);
+
+size_t zfp_metal_decode3d_int64_runtime(const void* stream_words,
+                                        unsigned int nx,
+                                        unsigned int ny,
+                                        unsigned int nz,
+                                        ptrdiff_t sx,
+                                        ptrdiff_t sy,
+                                        ptrdiff_t sz,
+                                        unsigned int maxbits,
+                                        long* dst);
+
 #ifdef __cplusplus
 }
 #endif

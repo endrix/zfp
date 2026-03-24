@@ -910,6 +910,268 @@ zfp_fallback_decode3d_int32(const void* stream_words,
   return ok;
 }
 
+/* ========================================================================== */
+/* Int64 CPU fallback encode/decode functions                                 */
+/* ========================================================================== */
+
+static size_t
+zfp_fallback_encode1d_int64(const int64* src, uint dim, int sx, uint maxbits, void* stream_words, size_t stream_capacity_bytes)
+{
+  zfp_field* field;
+  zfp_stream* zfp;
+  bitstream* bs;
+  size_t bytes;
+
+  if (!src || !stream_words)
+    return 0;
+
+  bs = stream_open(stream_words, stream_capacity_bytes);
+  if (!bs)
+    return 0;
+
+  zfp = zfp_stream_open(bs);
+  if (!zfp) {
+    stream_close(bs);
+    return 0;
+  }
+
+  zfp_stream_set_rate(zfp, (double)maxbits / 4.0, zfp_type_int64, 1, zfp_false);
+  field = zfp_field_1d((void*)src, zfp_type_int64, dim);
+  if (!field) {
+    zfp_stream_close(zfp);
+    stream_close(bs);
+    return 0;
+  }
+  zfp_field_set_stride_1d(field, sx);
+
+  bytes = zfp_compress(zfp, field);
+
+  zfp_field_free(field);
+  zfp_stream_close(zfp);
+  stream_close(bs);
+  return bytes;
+}
+
+static zfp_bool
+zfp_fallback_decode1d_int64(const void* stream_words, size_t stream_bytes, int64* dst, uint dim, int sx, uint maxbits)
+{
+  zfp_field* field;
+  zfp_stream* zfp;
+  bitstream* bs;
+  zfp_bool ok;
+
+  if (!stream_words || !dst)
+    return zfp_false;
+
+  bs = stream_open((void*)stream_words, stream_bytes);
+  if (!bs)
+    return zfp_false;
+
+  zfp = zfp_stream_open(bs);
+  if (!zfp) {
+    stream_close(bs);
+    return zfp_false;
+  }
+
+  zfp_stream_set_rate(zfp, (double)maxbits / 4.0, zfp_type_int64, 1, zfp_false);
+  field = zfp_field_1d(dst, zfp_type_int64, dim);
+  if (!field) {
+    zfp_stream_close(zfp);
+    stream_close(bs);
+    return zfp_false;
+  }
+  zfp_field_set_stride_1d(field, sx);
+
+  ok = zfp_decompress(zfp, field);
+
+  zfp_field_free(field);
+  zfp_stream_close(zfp);
+  stream_close(bs);
+  return ok;
+}
+
+static size_t
+zfp_fallback_encode2d_int64(const int64* src,
+                            uint nx,
+                            uint ny,
+                            ptrdiff_t sx,
+                            ptrdiff_t sy,
+                            uint maxbits,
+                            void* stream_words,
+                            size_t stream_capacity_bytes)
+{
+  zfp_field* field;
+  zfp_stream* zfp;
+  bitstream* bs;
+  size_t bytes;
+
+  if (!src || !stream_words)
+    return 0;
+
+  bs = stream_open(stream_words, stream_capacity_bytes);
+  if (!bs)
+    return 0;
+
+  zfp = zfp_stream_open(bs);
+  if (!zfp) {
+    stream_close(bs);
+    return 0;
+  }
+
+  zfp_stream_set_rate(zfp, (double)maxbits / 16.0, zfp_type_int64, 2, zfp_false);
+  field = zfp_field_2d((void*)src, zfp_type_int64, nx, ny);
+  if (!field) {
+    zfp_stream_close(zfp);
+    stream_close(bs);
+    return 0;
+  }
+  zfp_field_set_stride_2d(field, sx, sy);
+  bytes = zfp_compress(zfp, field);
+
+  zfp_field_free(field);
+  zfp_stream_close(zfp);
+  stream_close(bs);
+  return bytes;
+}
+
+static zfp_bool
+zfp_fallback_decode2d_int64(const void* stream_words,
+                            size_t stream_bytes,
+                            int64* dst,
+                            uint nx,
+                            uint ny,
+                            ptrdiff_t sx,
+                            ptrdiff_t sy,
+                            uint maxbits)
+{
+  zfp_field* field;
+  zfp_stream* zfp;
+  bitstream* bs;
+  zfp_bool ok;
+
+  if (!stream_words || !dst)
+    return zfp_false;
+
+  bs = stream_open((void*)stream_words, stream_bytes);
+  if (!bs)
+    return zfp_false;
+
+  zfp = zfp_stream_open(bs);
+  if (!zfp) {
+    stream_close(bs);
+    return zfp_false;
+  }
+
+  zfp_stream_set_rate(zfp, (double)maxbits / 16.0, zfp_type_int64, 2, zfp_false);
+  field = zfp_field_2d(dst, zfp_type_int64, nx, ny);
+  if (!field) {
+    zfp_stream_close(zfp);
+    stream_close(bs);
+    return zfp_false;
+  }
+  zfp_field_set_stride_2d(field, sx, sy);
+
+  ok = zfp_decompress(zfp, field);
+
+  zfp_field_free(field);
+  zfp_stream_close(zfp);
+  stream_close(bs);
+  return ok;
+}
+
+static size_t
+zfp_fallback_encode3d_int64(const int64* src,
+                            uint nx,
+                            uint ny,
+                            uint nz,
+                            ptrdiff_t sx,
+                            ptrdiff_t sy,
+                            ptrdiff_t sz,
+                            uint maxbits,
+                            void* stream_words,
+                            size_t stream_capacity_bytes)
+{
+  zfp_field* field;
+  zfp_stream* zfp;
+  bitstream* bs;
+  size_t bytes;
+
+  if (!src || !stream_words)
+    return 0;
+
+  bs = stream_open(stream_words, stream_capacity_bytes);
+  if (!bs)
+    return 0;
+
+  zfp = zfp_stream_open(bs);
+  if (!zfp) {
+    stream_close(bs);
+    return 0;
+  }
+
+  zfp_stream_set_rate(zfp, (double)maxbits / 64.0, zfp_type_int64, 3, zfp_false);
+  field = zfp_field_3d((void*)src, zfp_type_int64, nx, ny, nz);
+  if (!field) {
+    zfp_stream_close(zfp);
+    stream_close(bs);
+    return 0;
+  }
+  zfp_field_set_stride_3d(field, sx, sy, sz);
+  bytes = zfp_compress(zfp, field);
+
+  zfp_field_free(field);
+  zfp_stream_close(zfp);
+  stream_close(bs);
+  return bytes;
+}
+
+static zfp_bool
+zfp_fallback_decode3d_int64(const void* stream_words,
+                            size_t stream_bytes,
+                            int64* dst,
+                            uint nx,
+                            uint ny,
+                            uint nz,
+                            ptrdiff_t sx,
+                            ptrdiff_t sy,
+                            ptrdiff_t sz,
+                            uint maxbits)
+{
+  zfp_field* field;
+  zfp_stream* zfp;
+  bitstream* bs;
+  zfp_bool ok;
+
+  if (!stream_words || !dst)
+    return zfp_false;
+
+  bs = stream_open((void*)stream_words, stream_bytes);
+  if (!bs)
+    return zfp_false;
+
+  zfp = zfp_stream_open(bs);
+  if (!zfp) {
+    stream_close(bs);
+    return zfp_false;
+  }
+
+  zfp_stream_set_rate(zfp, (double)maxbits / 64.0, zfp_type_int64, 3, zfp_false);
+  field = zfp_field_3d(dst, zfp_type_int64, nx, ny, nz);
+  if (!field) {
+    zfp_stream_close(zfp);
+    stream_close(bs);
+    return zfp_false;
+  }
+  zfp_field_set_stride_3d(field, sx, sy, sz);
+
+  ok = zfp_decompress(zfp, field);
+
+  zfp_field_free(field);
+  zfp_stream_close(zfp);
+  stream_close(bs);
+  return ok;
+}
+
 static size_t
 zfp_compress_serial_from_buffer(zfp_stream* stream, const zfp_field* field, void* packed)
 {
@@ -1237,6 +1499,94 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
                                                      stream_bytes);
       if (!got)
         got = zfp_fallback_encode3d_int32((const int32*)field->data,
+                                          dims[0],
+                                          dims[1],
+                                          dims[2],
+                                          stride[0],
+                                          stride[1],
+                                          stride[2],
+                                          (uint)stream->maxbits,
+                                          stream_data(stream->stream),
+                                          stream_bytes);
+      if (got) {
+        stream_wseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
+        stream_flush(stream->stream);
+        return got;
+      }
+#endif
+    }
+
+    if (field->type == zfp_type_int64 && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+#ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
+      size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
+      size_t got = zfp_metal_encode1d_int64_runtime((const int64*)field->data,
+                                                     dims[0],
+                                                     (int)stride[0],
+                                                     (uint)stream->maxbits,
+                                                     stream_data(stream->stream),
+                                                     stream_bytes);
+      if (!got)
+        got = zfp_fallback_encode1d_int64((const int64*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits, stream_data(stream->stream), stream_bytes);
+      if (got) {
+        stream_wseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
+        stream_flush(stream->stream);
+        return got;
+      }
+#endif
+    }
+
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && !dims[2] &&
+        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+#ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
+      size_t px = (dims[0] + 3u) & ~3u;
+      size_t py = (dims[1] + 3u) & ~3u;
+      size_t blocks = (px * py) / 16u;
+      size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
+      size_t got = zfp_metal_encode2d_int64_runtime((const int64*)field->data,
+                                                     dims[0],
+                                                     dims[1],
+                                                     stride[0],
+                                                     stride[1],
+                                                     (uint)stream->maxbits,
+                                                     stream_data(stream->stream),
+                                                     stream_bytes);
+      if (!got)
+        got = zfp_fallback_encode2d_int64((const int64*)field->data,
+                                          dims[0],
+                                          dims[1],
+                                          stride[0],
+                                          stride[1],
+                                          (uint)stream->maxbits,
+                                          stream_data(stream->stream),
+                                          stream_bytes);
+      if (got) {
+        stream_wseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
+        stream_flush(stream->stream);
+        return got;
+      }
+#endif
+    }
+
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && dims[2] &&
+        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+#ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
+      size_t px = (dims[0] + 3u) & ~3u;
+      size_t py = (dims[1] + 3u) & ~3u;
+      size_t pz = (dims[2] + 3u) & ~3u;
+      size_t blocks = (px * py * pz) / 64u;
+      size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
+      size_t got = zfp_metal_encode3d_int64_runtime((const int64*)field->data,
+                                                     dims[0],
+                                                     dims[1],
+                                                     dims[2],
+                                                     stride[0],
+                                                     stride[1],
+                                                     stride[2],
+                                                     (uint)stream->maxbits,
+                                                     stream_data(stream->stream),
+                                                     stream_bytes);
+      if (!got)
+        got = zfp_fallback_encode3d_int64((const int64*)field->data,
                                           dims[0],
                                           dims[1],
                                           dims[2],
@@ -1600,6 +1950,94 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
         if (zfp_fallback_decode3d_int32(stream_data(stream->stream),
                                         stream_bytes,
                                         (int32*)field->data,
+                                        dims[0],
+                                        dims[1],
+                                        dims[2],
+                                        stride[0],
+                                        stride[1],
+                                        stride[2],
+                                        (uint)stream->maxbits))
+          got = stream_bytes;
+      }
+      if (got) {
+        stream_rseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
+        return;
+      }
+#endif
+    }
+
+    if (field->type == zfp_type_int64 && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+#ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
+      size_t got = zfp_metal_decode1d_int64_runtime(stream_data(stream->stream),
+                                                     dims[0],
+                                                     (int)stride[0],
+                                                     (uint)stream->maxbits,
+                                                     (int64*)field->data);
+      if (!got) {
+        size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
+        if (zfp_fallback_decode1d_int64(stream_data(stream->stream), stream_bytes, (int64*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits))
+          got = stream_bytes;
+      }
+      if (got) {
+        stream_rseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
+        return;
+      }
+#endif
+    }
+
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && !dims[2] &&
+        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+#ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
+      size_t got = zfp_metal_decode2d_int64_runtime(stream_data(stream->stream),
+                                                     dims[0],
+                                                     dims[1],
+                                                     stride[0],
+                                                     stride[1],
+                                                     (uint)stream->maxbits,
+                                                     (int64*)field->data);
+      if (!got) {
+        size_t px = (dims[0] + 3u) & ~3u;
+        size_t py = (dims[1] + 3u) & ~3u;
+        size_t blocks = (px * py) / 16u;
+        size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
+        if (zfp_fallback_decode2d_int64(stream_data(stream->stream),
+                                        stream_bytes,
+                                        (int64*)field->data,
+                                        dims[0],
+                                        dims[1],
+                                        stride[0],
+                                        stride[1],
+                                        (uint)stream->maxbits))
+          got = stream_bytes;
+      }
+      if (got) {
+        stream_rseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
+        return;
+      }
+#endif
+    }
+
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && dims[2] &&
+        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+#ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
+      size_t got = zfp_metal_decode3d_int64_runtime(stream_data(stream->stream),
+                                                     dims[0],
+                                                     dims[1],
+                                                     dims[2],
+                                                     stride[0],
+                                                     stride[1],
+                                                     stride[2],
+                                                     (uint)stream->maxbits,
+                                                     (int64*)field->data);
+      if (!got) {
+        size_t px = (dims[0] + 3u) & ~3u;
+        size_t py = (dims[1] + 3u) & ~3u;
+        size_t pz = (dims[2] + 3u) & ~3u;
+        size_t blocks = (px * py * pz) / 64u;
+        size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
+        if (zfp_fallback_decode3d_int64(stream_data(stream->stream),
+                                        stream_bytes,
+                                        (int64*)field->data,
                                         dims[0],
                                         dims[1],
                                         dims[2],

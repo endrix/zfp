@@ -96,6 +96,12 @@ typedef struct ZfpMetalContext {
   id<MTLComputePipelineState> decode2d_int32_ps;
   id<MTLComputePipelineState> encode3d_int32_ps;
   id<MTLComputePipelineState> decode3d_int32_ps;
+  id<MTLComputePipelineState> encode1d_int64_ps;
+  id<MTLComputePipelineState> decode1d_int64_ps;
+  id<MTLComputePipelineState> encode2d_int64_ps;
+  id<MTLComputePipelineState> decode2d_int64_ps;
+  id<MTLComputePipelineState> encode3d_int64_ps;
+  id<MTLComputePipelineState> decode3d_int64_ps;
   id<MTLBuffer> src_buf;
   id<MTLBuffer> dst_buf;
   id<MTLBuffer> params_buf;
@@ -257,6 +263,25 @@ zfp_metal_init_context()
         [NSString stringWithUTF8String:int32_kernels[i].name]];
       if (fn)
         *(int32_kernels[i].ps) = [zfp_metal_ctx.device
+          newComputePipelineStateWithFunction:fn error:&err];
+    }
+  }
+
+  /* Int64 codec PSOs */
+  {
+    struct { const char* name; id<MTLComputePipelineState>* ps; } int64_kernels[] = {
+      { "zfp_encode1d_int64", &zfp_metal_ctx.encode1d_int64_ps },
+      { "zfp_decode1d_int64", &zfp_metal_ctx.decode1d_int64_ps },
+      { "zfp_encode2d_int64", &zfp_metal_ctx.encode2d_int64_ps },
+      { "zfp_decode2d_int64", &zfp_metal_ctx.decode2d_int64_ps },
+      { "zfp_encode3d_int64", &zfp_metal_ctx.encode3d_int64_ps },
+      { "zfp_decode3d_int64", &zfp_metal_ctx.decode3d_int64_ps },
+    };
+    for (size_t i = 0; i < sizeof(int64_kernels) / sizeof(int64_kernels[0]); ++i) {
+      id<MTLFunction> fn = [lib newFunctionWithName:
+        [NSString stringWithUTF8String:int64_kernels[i].name]];
+      if (fn)
+        *(int64_kernels[i].ps) = [zfp_metal_ctx.device
           newComputePipelineStateWithFunction:fn error:&err];
     }
   }
@@ -792,6 +817,354 @@ zfp_metal_decode3d_int32_runtime(const void* stream_words,
   params.total_blocks = blocks;
 
   if (!zfp_metal_launch_codec3d(zfp_metal_ctx.decode3d_int32_ps, src_buf, dst_buf, &params, 0))
+    return 0;
+
+  return stream_bytes;
+}
+
+/* ========================================================================== */
+/* Int64 runtime encode/decode functions                                      */
+/* ========================================================================== */
+
+extern "C" size_t
+zfp_metal_encode1d_int64_runtime(const long* src,
+                                 unsigned int dim,
+                                 int sx,
+                                 unsigned int maxbits,
+                                 void* stream_words,
+                                 size_t stream_capacity_bytes)
+{
+  if (!zfp_metal_init_context())
+    return 0;
+  if (!zfp_metal_ctx.encode1d_int64_ps)
+    return 0;
+
+  size_t stream_bytes = zfp_calc_stream_bytes_1d(dim, maxbits);
+  if (stream_capacity_bytes < stream_bytes)
+    return 0;
+
+  unsigned int padded = dim;
+  if (padded % 4u)
+    padded += 4u - (padded % 4u);
+  unsigned int blocks = padded / 4u;
+
+  id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
+                                                                     length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(long)
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!src_buf)
+    return 0;
+
+  id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!dst_buf)
+    return 0;
+
+  ZfpMetalCodec1dParams params;
+  params.dim = dim;
+  params.sx = sx;
+  params.maxbits = maxbits;
+  params.padded_dim = padded;
+  params.total_blocks = blocks;
+
+  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.encode1d_int64_ps, src_buf, dst_buf, &params, stream_bytes))
+    return 0;
+
+  return stream_bytes;
+}
+
+extern "C" size_t
+zfp_metal_decode1d_int64_runtime(const void* stream_words,
+                                 unsigned int dim,
+                                 int sx,
+                                 unsigned int maxbits,
+                                 long* dst)
+{
+  if (!zfp_metal_init_context())
+    return 0;
+  if (!zfp_metal_ctx.decode1d_int64_ps)
+    return 0;
+
+  size_t stream_bytes = zfp_calc_stream_bytes_1d(dim, maxbits);
+
+  unsigned int padded = dim;
+  if (padded % 4u)
+    padded += 4u - (padded % 4u);
+  unsigned int blocks = padded / 4u;
+
+  id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!src_buf)
+    return 0;
+
+  id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
+                                                                     length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(long)
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!dst_buf)
+    return 0;
+
+  ZfpMetalCodec1dParams params;
+  params.dim = dim;
+  params.sx = sx;
+  params.maxbits = maxbits;
+  params.padded_dim = padded;
+  params.total_blocks = blocks;
+
+  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.decode1d_int64_ps, src_buf, dst_buf, &params, 0))
+    return 0;
+
+  return stream_bytes;
+}
+
+extern "C" size_t
+zfp_metal_encode2d_int64_runtime(const long* src,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 unsigned int maxbits,
+                                 void* stream_words,
+                                 size_t stream_capacity_bytes)
+{
+  if (!zfp_metal_init_context())
+    return 0;
+  if (!zfp_metal_ctx.encode2d_int64_ps)
+    return 0;
+
+  size_t stream_bytes = zfp_calc_stream_bytes_2d(nx, ny, maxbits);
+  if (stream_capacity_bytes < stream_bytes)
+    return 0;
+
+  unsigned int px = (nx + 3u) & ~3u;
+  unsigned int py = (ny + 3u) & ~3u;
+  unsigned int bx = px / 4u;
+  unsigned int by = py / 4u;
+  unsigned int blocks = bx * by;
+
+  size_t src_len = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
+  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
+  if (row_span > src_len)
+    src_len = row_span;
+
+  id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
+                                                                     length:src_len * sizeof(long)
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!src_buf)
+    return 0;
+
+  id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!dst_buf)
+    return 0;
+
+  ZfpMetalCodec2dParams params;
+  params.nx = nx;
+  params.ny = ny;
+  params.sx = (long)sx;
+  params.sy = (long)sy;
+  params.maxbits = maxbits;
+  params.bx = bx;
+  params.by = by;
+  params.total_blocks = blocks;
+
+  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.encode2d_int64_ps, src_buf, dst_buf, &params, stream_bytes))
+    return 0;
+
+  return stream_bytes;
+}
+
+extern "C" size_t
+zfp_metal_decode2d_int64_runtime(const void* stream_words,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 unsigned int maxbits,
+                                 long* dst)
+{
+  if (!zfp_metal_init_context())
+    return 0;
+  if (!zfp_metal_ctx.decode2d_int64_ps)
+    return 0;
+
+  size_t stream_bytes = zfp_calc_stream_bytes_2d(nx, ny, maxbits);
+
+  unsigned int px = (nx + 3u) & ~3u;
+  unsigned int py = (ny + 3u) & ~3u;
+  unsigned int bx = px / 4u;
+  unsigned int by = py / 4u;
+  unsigned int blocks = bx * by;
+
+  id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!src_buf)
+    return 0;
+
+  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
+  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
+  if (row_span > span)
+    span = row_span;
+
+  id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
+                                                                     length:span * sizeof(long)
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!dst_buf)
+    return 0;
+
+  ZfpMetalCodec2dParams params;
+  params.nx = nx;
+  params.ny = ny;
+  params.sx = (long)sx;
+  params.sy = (long)sy;
+  params.maxbits = maxbits;
+  params.bx = bx;
+  params.by = by;
+  params.total_blocks = blocks;
+
+  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.decode2d_int64_ps, src_buf, dst_buf, &params, 0))
+    return 0;
+
+  return stream_bytes;
+}
+
+extern "C" size_t
+zfp_metal_encode3d_int64_runtime(const long* src,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 unsigned int nz,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 ptrdiff_t sz,
+                                 unsigned int maxbits,
+                                 void* stream_words,
+                                 size_t stream_capacity_bytes)
+{
+  if (!zfp_metal_init_context())
+    return 0;
+  if (!zfp_metal_ctx.encode3d_int64_ps)
+    return 0;
+
+  size_t stream_bytes = zfp_calc_stream_bytes_3d(nx, ny, nz, maxbits);
+  if (stream_capacity_bytes < stream_bytes)
+    return 0;
+
+  unsigned int px = (nx + 3u) & ~3u;
+  unsigned int py = (ny + 3u) & ~3u;
+  unsigned int pz = (nz + 3u) & ~3u;
+  unsigned int bx = px / 4u;
+  unsigned int by = py / 4u;
+  unsigned int bz = pz / 4u;
+  unsigned int blocks = bx * by * bz;
+
+  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
+  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
+  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
+  if (s2 > span) span = s2;
+  if (s3 > span) span = s3;
+
+  id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
+                                                                     length:span * sizeof(long)
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!src_buf)
+    return 0;
+
+  id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!dst_buf)
+    return 0;
+
+  ZfpMetalCodec3dParams params;
+  params.nx = nx;
+  params.ny = ny;
+  params.nz = nz;
+  params.sx = (long)sx;
+  params.sy = (long)sy;
+  params.sz = (long)sz;
+  params.maxbits = maxbits;
+  params.bx = bx;
+  params.by = by;
+  params.bz = bz;
+  params.total_blocks = blocks;
+
+  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.encode3d_int64_ps, src_buf, dst_buf, &params, stream_bytes))
+    return 0;
+
+  return stream_bytes;
+}
+
+extern "C" size_t
+zfp_metal_decode3d_int64_runtime(const void* stream_words,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 unsigned int nz,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 ptrdiff_t sz,
+                                 unsigned int maxbits,
+                                 long* dst)
+{
+  if (!zfp_metal_init_context())
+    return 0;
+  if (!zfp_metal_ctx.decode3d_int64_ps)
+    return 0;
+
+  size_t stream_bytes = zfp_calc_stream_bytes_3d(nx, ny, nz, maxbits);
+  unsigned int px = (nx + 3u) & ~3u;
+  unsigned int py = (ny + 3u) & ~3u;
+  unsigned int pz = (nz + 3u) & ~3u;
+  unsigned int bx = px / 4u;
+  unsigned int by = py / 4u;
+  unsigned int bz = pz / 4u;
+  unsigned int blocks = bx * by * bz;
+
+  id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!src_buf)
+    return 0;
+
+  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
+  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
+  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
+  if (s2 > span) span = s2;
+  if (s3 > span) span = s3;
+
+  id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
+                                                                     length:span * sizeof(long)
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
+  if (!dst_buf)
+    return 0;
+
+  ZfpMetalCodec3dParams params;
+  params.nx = nx;
+  params.ny = ny;
+  params.nz = nz;
+  params.sx = (long)sx;
+  params.sy = (long)sy;
+  params.sz = (long)sz;
+  params.maxbits = maxbits;
+  params.bx = bx;
+  params.by = by;
+  params.bz = bz;
+  params.total_blocks = blocks;
+
+  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.decode3d_int64_ps, src_buf, dst_buf, &params, 0))
     return 0;
 
   return stream_bytes;
@@ -1961,6 +2334,126 @@ zfp_metal_decode3d_int32_runtime(const void* stream_words,
                                  ptrdiff_t sz,
                                  unsigned int maxbits,
                                  int* dst)
+{
+  (void)stream_words;
+  (void)nx;
+  (void)ny;
+  (void)nz;
+  (void)sx;
+  (void)sy;
+  (void)sz;
+  (void)maxbits;
+  (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode1d_int64_runtime(const long* src,
+                                 unsigned int dim,
+                                 int sx,
+                                 unsigned int maxbits,
+                                 void* stream_words,
+                                 size_t stream_capacity_bytes)
+{
+  (void)src;
+  (void)dim;
+  (void)sx;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode1d_int64_runtime(const void* stream_words,
+                                 unsigned int dim,
+                                 int sx,
+                                 unsigned int maxbits,
+                                 long* dst)
+{
+  (void)stream_words;
+  (void)dim;
+  (void)sx;
+  (void)maxbits;
+  (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode2d_int64_runtime(const long* src,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 unsigned int maxbits,
+                                 void* stream_words,
+                                 size_t stream_capacity_bytes)
+{
+  (void)src;
+  (void)nx;
+  (void)ny;
+  (void)sx;
+  (void)sy;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode2d_int64_runtime(const void* stream_words,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 unsigned int maxbits,
+                                 long* dst)
+{
+  (void)stream_words;
+  (void)nx;
+  (void)ny;
+  (void)sx;
+  (void)sy;
+  (void)maxbits;
+  (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode3d_int64_runtime(const long* src,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 unsigned int nz,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 ptrdiff_t sz,
+                                 unsigned int maxbits,
+                                 void* stream_words,
+                                 size_t stream_capacity_bytes)
+{
+  (void)src;
+  (void)nx;
+  (void)ny;
+  (void)nz;
+  (void)sx;
+  (void)sy;
+  (void)sz;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode3d_int64_runtime(const void* stream_words,
+                                 unsigned int nx,
+                                 unsigned int ny,
+                                 unsigned int nz,
+                                 ptrdiff_t sx,
+                                 ptrdiff_t sy,
+                                 ptrdiff_t sz,
+                                 unsigned int maxbits,
+                                 long* dst)
 {
   (void)stream_words;
   (void)nx;
