@@ -202,6 +202,39 @@ zfp_metal_init_context()
   zfp_metal_ctx.encode3d_float_ps = [zfp_metal_ctx.device newComputePipelineStateWithFunction:fn_encode3d_float error:&err];
   zfp_metal_ctx.decode3d_float_ps = [zfp_metal_ctx.device newComputePipelineStateWithFunction:fn_decode3d_float error:&err];
 
+  /* Rate-specialized PSOs (r8, r16, r32) -- optional, used when maxbits
+     matches a compile-time constant so the Metal compiler can optimize
+     the bit-plane loop and eliminate the atomic_mode branch. */
+  {
+    struct { const char* name; id<MTLComputePipelineState>* ps; } rate_kernels[] = {
+      { "zfp_encode1d_float_r8",  &zfp_metal_ctx.encode1d_float_r8_ps },
+      { "zfp_decode1d_float_r8",  &zfp_metal_ctx.decode1d_float_r8_ps },
+      { "zfp_encode1d_float_r16", &zfp_metal_ctx.encode1d_float_r16_ps },
+      { "zfp_decode1d_float_r16", &zfp_metal_ctx.decode1d_float_r16_ps },
+      { "zfp_encode1d_float_r32", &zfp_metal_ctx.encode1d_float_r32_ps },
+      { "zfp_decode1d_float_r32", &zfp_metal_ctx.decode1d_float_r32_ps },
+      { "zfp_encode2d_float_r8",  &zfp_metal_ctx.encode2d_float_r8_ps },
+      { "zfp_decode2d_float_r8",  &zfp_metal_ctx.decode2d_float_r8_ps },
+      { "zfp_encode2d_float_r16", &zfp_metal_ctx.encode2d_float_r16_ps },
+      { "zfp_decode2d_float_r16", &zfp_metal_ctx.decode2d_float_r16_ps },
+      { "zfp_encode2d_float_r32", &zfp_metal_ctx.encode2d_float_r32_ps },
+      { "zfp_decode2d_float_r32", &zfp_metal_ctx.decode2d_float_r32_ps },
+      { "zfp_encode3d_float_r8",  &zfp_metal_ctx.encode3d_float_r8_ps },
+      { "zfp_decode3d_float_r8",  &zfp_metal_ctx.decode3d_float_r8_ps },
+      { "zfp_encode3d_float_r16", &zfp_metal_ctx.encode3d_float_r16_ps },
+      { "zfp_decode3d_float_r16", &zfp_metal_ctx.decode3d_float_r16_ps },
+      { "zfp_encode3d_float_r32", &zfp_metal_ctx.encode3d_float_r32_ps },
+      { "zfp_decode3d_float_r32", &zfp_metal_ctx.decode3d_float_r32_ps },
+    };
+    for (size_t i = 0; i < sizeof(rate_kernels) / sizeof(rate_kernels[0]); ++i) {
+      id<MTLFunction> fn = [lib newFunctionWithName:
+        [NSString stringWithUTF8String:rate_kernels[i].name]];
+      if (fn)
+        *(rate_kernels[i].ps) = [zfp_metal_ctx.device
+          newComputePipelineStateWithFunction:fn error:&err];
+    }
+  }
+
   if (!zfp_metal_ensure_buffer(zfp_metal_ctx.device, &zfp_metal_ctx.params_buf, &zfp_metal_ctx.params_cap, sizeof(ZfpMetalLayoutParams))) {
     zfp_metal_log_error_once("params buffer allocation", nil);
     return 0;
@@ -261,7 +294,8 @@ static int
 zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
-                         const ZfpMetalCodec1dParams* params)
+                         const ZfpMetalCodec1dParams* params,
+                         size_t fill_dst_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -274,6 +308,13 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
   memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec1dParams));
 
   id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
+
+  if (fill_dst_bytes > 0) {
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit fillBuffer:dst_buf range:NSMakeRange(0, fill_dst_bytes) value:0];
+    [blit endEncoding];
+  }
+
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
   [enc setBuffer:src_buf offset:0 atIndex:0];
@@ -296,37 +337,66 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
   return [cb status] == MTLCommandBufferStatusCompleted;
 }
 
+/* Rate-specialized PSO selection.
+   maxbits = rate * block_size, where block_size = 4^dims.
+   Kernel names r8/r16/r32 refer to rate (bits per value).
+   1D block = 4 values:  rate 8->maxbits 32, rate 16->64, rate 32->128
+   2D block = 16 values: rate 8->128, rate 16->256, rate 32->512
+   3D block = 64 values: rate 8->512, rate 16->1024, rate 32->2048 */
+
 static id<MTLComputePipelineState>
 zfp_metal_select_1d_encode_pso(unsigned int maxbits)
 {
-  (void)maxbits;
+  if (maxbits == 32u && zfp_metal_ctx.encode1d_float_r8_ps)
+    return zfp_metal_ctx.encode1d_float_r8_ps;
+  if (maxbits == 64u && zfp_metal_ctx.encode1d_float_r16_ps)
+    return zfp_metal_ctx.encode1d_float_r16_ps;
+  if (maxbits == 128u && zfp_metal_ctx.encode1d_float_r32_ps)
+    return zfp_metal_ctx.encode1d_float_r32_ps;
   return zfp_metal_ctx.encode1d_float_ps;
 }
 
 static id<MTLComputePipelineState>
 zfp_metal_select_1d_decode_pso(unsigned int maxbits)
 {
-  (void)maxbits;
+  if (maxbits == 32u && zfp_metal_ctx.decode1d_float_r8_ps)
+    return zfp_metal_ctx.decode1d_float_r8_ps;
+  if (maxbits == 64u && zfp_metal_ctx.decode1d_float_r16_ps)
+    return zfp_metal_ctx.decode1d_float_r16_ps;
+  if (maxbits == 128u && zfp_metal_ctx.decode1d_float_r32_ps)
+    return zfp_metal_ctx.decode1d_float_r32_ps;
   return zfp_metal_ctx.decode1d_float_ps;
 }
 
 static id<MTLComputePipelineState>
 zfp_metal_select_2d_encode_pso(unsigned int maxbits)
 {
-  (void)maxbits;
+  if (maxbits == 128u && zfp_metal_ctx.encode2d_float_r8_ps)
+    return zfp_metal_ctx.encode2d_float_r8_ps;
+  if (maxbits == 256u && zfp_metal_ctx.encode2d_float_r16_ps)
+    return zfp_metal_ctx.encode2d_float_r16_ps;
+  if (maxbits == 512u && zfp_metal_ctx.encode2d_float_r32_ps)
+    return zfp_metal_ctx.encode2d_float_r32_ps;
   return zfp_metal_ctx.encode2d_float_ps;
 }
 
 static id<MTLComputePipelineState>
 zfp_metal_select_2d_decode_pso(unsigned int maxbits)
 {
-  (void)maxbits;
+  if (maxbits == 128u && zfp_metal_ctx.decode2d_float_r8_ps)
+    return zfp_metal_ctx.decode2d_float_r8_ps;
+  if (maxbits == 256u && zfp_metal_ctx.decode2d_float_r16_ps)
+    return zfp_metal_ctx.decode2d_float_r16_ps;
+  if (maxbits == 512u && zfp_metal_ctx.decode2d_float_r32_ps)
+    return zfp_metal_ctx.decode2d_float_r32_ps;
   return zfp_metal_ctx.decode2d_float_ps;
 }
 
 static id<MTLComputePipelineState>
 zfp_metal_select_3d_encode_pso(unsigned int maxbits)
 {
+  /* Rate-specialized 3D PSOs hurt performance (register pressure causes
+     occupancy drop), so always use the generic kernel for 3D. */
   (void)maxbits;
   return zfp_metal_ctx.encode3d_float_ps;
 }
@@ -372,8 +442,6 @@ zfp_metal_encode1d_float_runtime(const float* src,
   if (!dst_buf)
     return 0;
 
-  memset(stream_words, 0, stream_bytes);
-
   ZfpMetalCodec1dParams params;
   params.dim = dim;
   params.sx = sx;
@@ -381,7 +449,7 @@ zfp_metal_encode1d_float_runtime(const float* src,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_encode_pso(maxbits), src_buf, dst_buf, &params))
+  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes))
     return 0;
 
   return stream_bytes;
@@ -425,7 +493,7 @@ zfp_metal_decode1d_float_runtime(const void* stream_words,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_decode_pso(maxbits), src_buf, dst_buf, &params))
+  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_decode_pso(maxbits), src_buf, dst_buf, &params, 0))
     return 0;
 
   return stream_bytes;
@@ -435,7 +503,8 @@ static int
 zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
-                         const ZfpMetalCodec2dParams* params)
+                         const ZfpMetalCodec2dParams* params,
+                         size_t fill_dst_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -448,6 +517,13 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
   memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec2dParams));
 
   id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
+
+  if (fill_dst_bytes > 0) {
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit fillBuffer:dst_buf range:NSMakeRange(0, fill_dst_bytes) value:0];
+    [blit endEncoding];
+  }
+
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
   [enc setBuffer:src_buf offset:0 atIndex:0];
@@ -474,7 +550,8 @@ static int
 zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
-                         const ZfpMetalCodec3dParams* params)
+                         const ZfpMetalCodec3dParams* params,
+                         size_t fill_dst_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -487,6 +564,13 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
   memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec3dParams));
 
   id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
+
+  if (fill_dst_bytes > 0) {
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    [blit fillBuffer:dst_buf range:NSMakeRange(0, fill_dst_bytes) value:0];
+    [blit endEncoding];
+  }
+
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
   [enc setBuffer:src_buf offset:0 atIndex:0];
@@ -551,8 +635,6 @@ zfp_metal_encode2d_float_runtime(const float* src,
   if (!dst_buf)
     return 0;
 
-  memset(stream_words, 0, stream_bytes);
-
   ZfpMetalCodec2dParams params;
   params.nx = nx;
   params.ny = ny;
@@ -563,7 +645,7 @@ zfp_metal_encode2d_float_runtime(const float* src,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_encode_pso(maxbits), src_buf, dst_buf, &params))
+  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes))
     return 0;
 
   return stream_bytes;
@@ -618,7 +700,7 @@ zfp_metal_decode2d_float_runtime(const void* stream_words,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_decode_pso(maxbits), src_buf, dst_buf, &params))
+  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_decode_pso(maxbits), src_buf, dst_buf, &params, 0))
     return 0;
 
   return stream_bytes;
@@ -671,8 +753,6 @@ zfp_metal_encode3d_float_runtime(const float* src,
   if (!dst_buf)
     return 0;
 
-  memset(stream_words, 0, stream_bytes);
-
   ZfpMetalCodec3dParams params;
   params.nx = nx;
   params.ny = ny;
@@ -686,7 +766,7 @@ zfp_metal_encode3d_float_runtime(const float* src,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_encode_pso(maxbits), src_buf, dst_buf, &params))
+  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes))
     return 0;
 
   return stream_bytes;
@@ -748,7 +828,7 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_decode_pso(maxbits), src_buf, dst_buf, &params))
+  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_decode_pso(maxbits), src_buf, dst_buf, &params, 0))
     return 0;
 
   return stream_bytes;

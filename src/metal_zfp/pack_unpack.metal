@@ -1064,7 +1064,7 @@ kernel void zfp_encode1d_float_r##RATE( \
     else if (idx > 0u) \
       fblock[i] = fblock[i - 1u]; \
   } \
-  zfp_encode_block_1d_float(fblock, RATE, block_idx, out, ((RATE & 31u) != 0u)); \
+  zfp_encode_block_1d_float(fblock, (RATE) * 4u, block_idx, out, ((((RATE) * 4u) & 31u) != 0u)); \
 } \
 kernel void zfp_decode1d_float_r##RATE( \
   device const ulong* in [[buffer(0)]], \
@@ -1078,7 +1078,7 @@ kernel void zfp_decode1d_float_r##RATE( \
   uint i0 = block_idx * 4u; \
   long offset = (long)i0 * (long)p.sx; \
   float fblock[4]; \
-  zfp_decode_block_1d_float(in, RATE, block_idx, fblock); \
+  zfp_decode_block_1d_float(in, (RATE) * 4u, block_idx, fblock); \
   if (i0 + 4u <= p.dim) { \
     out[offset + 0l * (long)p.sx] = fblock[0]; \
     out[offset + 1l * (long)p.sx] = fblock[1]; \
@@ -1136,7 +1136,7 @@ kernel void zfp_encode2d_float_r##RATE( \
       for (uint y = ny; y < 4u; ++y) \
         fblock[4u * y + x] = fblock[4u * (ny - 1u) + x]; \
   } \
-  zfp_encode_block_2d_float(fblock, RATE, block_idx, stream, ((RATE & 31u) != 0u)); \
+  zfp_encode_block_2d_float(fblock, (RATE) * 16u, block_idx, stream, ((((RATE) * 16u) & 31u) != 0u)); \
 } \
 kernel void zfp_decode2d_float_r##RATE( \
   device const ulong* stream [[buffer(0)]], \
@@ -1153,7 +1153,7 @@ kernel void zfp_decode2d_float_r##RATE( \
   uint y0 = by * 4u; \
   long base = (long)x0 * p.sx + (long)y0 * p.sy; \
   float fblock[16]; \
-  zfp_decode_block_2d_float(stream, RATE, block_idx, fblock); \
+  zfp_decode_block_2d_float(stream, (RATE) * 16u, block_idx, fblock); \
   if (x0 + 4u <= p.nx && y0 + 4u <= p.ny) { \
     for (uint y = 0; y < 4u; ++y) \
       for (uint x = 0; x < 4u; ++x) \
@@ -1207,7 +1207,7 @@ kernel void zfp_encode3d_float_r##RATE( \
             fblock[idx] = 0.0f; \
         } \
   } \
-  zfp_encode_block_3d_float(fblock, RATE, block_idx, stream, ((RATE & 31u) != 0u)); \
+  zfp_encode_block_3d_float(fblock, (RATE) * 64u, block_idx, stream, ((((RATE) * 64u) & 31u) != 0u)); \
 } \
 kernel void zfp_decode3d_float_r##RATE( \
   device const ulong* stream [[buffer(0)]], \
@@ -1226,7 +1226,7 @@ kernel void zfp_decode3d_float_r##RATE( \
   uint z0 = bz * 4u; \
   long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz; \
   float fblock[64]; \
-  zfp_decode_block_3d_float(stream, RATE, block_idx, fblock); \
+  zfp_decode_block_3d_float(stream, (RATE) * 64u, block_idx, fblock); \
   if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) { \
     for (uint z = 0; z < 4u; ++z) \
       for (uint y = 0; y < 4u; ++y) \

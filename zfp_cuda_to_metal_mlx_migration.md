@@ -537,7 +537,210 @@ Notes:
 
 - Current state has recovered from the specialized-kernel regression, but remains below the earlier best `rateopt` decode throughput, especially for 2D/3D.
 
-### 13.6 Current focus
+### 13.6 Current performance baseline (latest measurements)
+
+Element counts and test array sizes:
+
+- 1D: `1,048,577` floats (~4 MB)
+- 2D: `1025 x 1025` floats (~4 MB)
+- 3D: `129 x 129 x 129` floats (~8.6 MB)
+
+Metal native codec, float path (5-repeat median, seconds):
+
+| Test | Compress | Decompress |
+|------|----------|------------|
+| 1D Float | 0.014 | 0.005 |
+| 2D Float | 0.034 | 0.008 |
+| 3D Float | 0.052 | 0.012 |
+
+Serial CPU baseline (5-repeat median, seconds):
+
+| Test | Compress | Decompress |
+|------|----------|------------|
+| 1D Float | 0.030 | 0.029 |
+| 2D Float | 0.019 | 0.019 |
+| 3D Float | 0.027 | 0.037 |
+
+Speedup summary (Metal vs Serial, higher is better):
+
+| Path | Compress | Decompress |
+|------|----------|------------|
+| 1D Float | **2.1x** | **5.9x** |
+| 2D Float | **0.56x** (slower) | **2.4x** |
+| 3D Float | **0.52x** (slower) | **3.1x** |
+
+Key observation: Decompress is consistently faster on Metal. Compress is faster only for 1D; 2D/3D compress is ~1.8-1.9x *slower* than serial CPU.
+
+### 13.7 Current focus
 
 - Keep parity stable while pursuing throughput gains.
 - Next high-impact item: true rate-specialized inner coder loops (real unrolled bitplane read/write paths), not only specialized kernel wrappers.
+
+---
+
+## 14. Metal acceleration plan
+
+This section describes a prioritized, incremental plan to close the compress performance gap and further improve decompress throughput. Each item is ordered by expected impact and designed to be independently testable.
+
+### 14.0 Guiding principles
+
+1. **Correctness first**: Every optimization must pass the existing 14-test CTest suite before measuring performance. Never merge a perf change that breaks bitstream parity.
+2. **Measure before and after**: Use `tests/perf/run_perf_suite.py --repeats 5` and save JSON snapshots. Compare median values.
+3. **One variable at a time**: Each item below is a standalone change. Ship and measure before combining.
+4. **Host overhead dominates compress**: The data shows 2D/3D compress is slower than serial. This means the GPU kernel time is *less* than the combined host overhead (buffer creation, memset, command buffer setup, synchronous wait). Host-side optimization must come first.
+
+### 14.1 Phase A: Eliminate host-side launch overhead (highest impact)
+
+**Problem**: Every codec call in `metal_runtime.mm` creates two new `MTLBuffer` objects via `newBufferWithBytesNoCopy`, a new `MTLCommandBuffer`, a new encoder, commits, and calls `waitUntilCompleted`. For encode, there is also a `memset(stream_words, 0, stream_bytes)` on the CPU before dispatch.
+
+**Why this matters**: `newBufferWithBytesNoCopy` requires the Metal driver to validate page alignment and register the memory region with the GPU MMU. This takes microseconds per call -- a fixed cost that dominates when kernel execution itself is only tens of microseconds (as it is for ~4 MB arrays).
+
+#### A1. Reuse src/dst MTLBuffer objects across calls
+
+**Files**: `src/metal_zfp/metal_runtime.mm`
+
+- Add `src_buf` / `dst_buf` fields to `ZfpMetalContext` for codec paths (separate from layout pack/unpack which already has them).
+- Track capacity. On each codec call, check if existing buffer covers the needed byte range; only reallocate if not.
+- `newBufferWithBytesNoCopy` requires page-aligned base and page-multiple length. If the caller's buffer doesn't meet these constraints, fall back to `newBufferWithLength` + memcpy (which is still cheaper than re-creating each time).
+- Pattern: mirror the existing `zfp_metal_ensure_buffer()` approach already used for `params_buf`.
+
+**Expected impact**: Removes 2 buffer creation calls per codec dispatch. Should disproportionately help 2D/3D compress where block counts (and thus the ratio of overhead to useful work) are worst.
+
+#### A2. Move stream zero-fill to GPU
+
+**Files**: `src/metal_zfp/metal_runtime.mm`, `src/metal_zfp/pack_unpack.metal`
+
+- The `memset(stream_words, 0, stream_bytes)` before encode is required because the block encoder ORs bits into the output. Currently done on CPU.
+- Option 1 (preferred): Add a trivial `zfp_memset_uint` MSL kernel that zeros the stream buffer on GPU. Dispatch it as the first command in the same command buffer as the encode kernel.
+- Option 2: Use `MTLBlitCommandEncoder fillBuffer:range:value:` which is a Metal built-in and avoids a custom kernel.
+- Either way, the zero-fill happens on the GPU timeline without a CPU stall.
+
+**Expected impact**: Eliminates the CPU memset that touches every byte of the output buffer. For 3D float at rate 16, stream is ~2 MB -- zeroing that on CPU before GPU dispatch is pure waste.
+
+#### A3. Batch command encoding / reduce synchronization
+
+**Files**: `src/metal_zfp/metal_runtime.mm`
+
+- Currently: one `MTLCommandBuffer` per kernel dispatch, committed and waited on synchronously.
+- Change: for encode path, encode the zero-fill blit + codec kernel into a single command buffer, single commit.
+- For decode: single command buffer, single commit (no zero-fill needed).
+- Optionally: if caller does compress-then-decompress (as end-to-end tests do), investigate a "batch" API that pipelines both into one command buffer. (Lower priority; the test harness calls them separately.)
+
+**Expected impact**: Reduces Metal driver overhead from 2 round-trips (zero + encode) to 1.
+
+### 14.2 Phase B: Kernel-level optimization (medium impact, compress-focused)
+
+**Problem**: The compress kernel is the bottleneck. Decompress already shows 2-6x speedup. The ZFP block encoder uses a variable-length embedded coding loop with per-bit branches -- this is inherently divergent on GPU.
+
+#### B1. Enable rate-specialized PSO selection
+
+**Files**: `src/metal_zfp/metal_runtime.mm` (PSO selectors), `src/metal_zfp/pack_unpack.metal` (rate-specialized kernels)
+
+- The rate-specialized PSOs (`encode1d_float_r8_ps`, etc.) are already compiled and loaded but the `zfp_metal_select_*` functions always return the generic PSO (lines 299-339 of `metal_runtime.mm`).
+- Enable selection: when `maxbits` matches 8, 16, or 32, return the rate-specialized PSO.
+- The rate-specialized kernels in `pack_unpack.metal` (via `ZFP_DEFINE_RATE_KERNELS_*D` macros) pass the rate as a compile-time constant. This allows the MSL compiler to:
+  - Resolve `atomic_mode = (RATE & 31u) != 0u` at compile time (rate 32 -> non-atomic, rate 8/16 -> atomic).
+  - Potentially constant-fold parts of the bitplane loop upper bound.
+- **Caveat from 13.4**: Previous attempt regressed because only the wrapper was specialized, not the inner coder. The current macros DO pass the rate constant into `zfp_encode_block_*d_float(fblock, RATE, ...)` so the inner coder can benefit. Re-measure carefully.
+
+**Expected impact**: Moderate. The MSL compiler may unroll the bitplane loop and eliminate branches for known rates. Worth 10-30% on compress.
+
+#### B2. Investigate threadgroup memory / SIMD-group cooperation
+
+**Files**: `src/metal_zfp/pack_unpack.metal`
+
+- Currently each thread processes one entire block independently (1 block = 4/16/64 values). There is no SIMD-group cooperation.
+- ZFP's embedded coding is inherently serial *within a block* because each bitplane depends on the group-test of previous planes.
+- However, the *gathering* of source data and the *lifting transform* stages are regular and could benefit from SIMD-group loads.
+- Investigate:
+  - Using `simd_shuffle` to broadcast/gather the 4 values in a 1D block from a SIMD lane.
+  - For 3D: using threadgroup shared memory to stage the 64-float block load (coalesced read from device memory into threadgroup, then per-thread lift from threadgroup).
+- This requires careful measurement. The current block sizes (4 for 1D, 16 for 2D, 64 for 3D) may not map well to SIMD widths (32 on Apple GPU).
+
+**Expected impact**: Uncertain. 3D blocks (64 values) are the best candidate. May help 5-15% on both compress and decompress.
+
+#### B3. Optimize the inner bitplane encoder
+
+**Files**: `src/metal_zfp/pack_unpack.metal`
+
+- The encode loop (lines 532-545 for 1D, 633-645 for 2D, 734-746 for 3D) has per-bit branches (`zfp_writer_write_bit`) inside a variable-iteration loop.
+- The bit-writer itself (lines 416-444) has a while loop for cross-word writes.
+- Potential optimizations:
+  - **Pre-compute group test**: For each bitplane k, compute `x` (the OR of all bits at plane k) in a single pass, then decide the coding path. Avoid the inner branch chain when `x == 0` (early termination).
+  - **Batch write for known-zero planes**: If the rate is fixed and the number of zero-planes is known, skip them without individual bit writes.
+  - **Reduce write-combining cache misses**: The writer has a single-word cache (`cache_wi`, `cache_val`). For non-atomic mode, accumulate a full 64-bit word before flushing. Currently flushes on every word-index change (32-bit granularity).
+- This is the most complex optimization and should come after A1-A3 to have a cleaner baseline.
+
+**Expected impact**: 15-40% improvement on compress, especially for higher rates where more bitplanes are coded.
+
+### 14.3 Phase C: Double/int32/int64 native kernels (expanding coverage)
+
+**Problem**: Non-float types fall back to serial CPU. For double, this is actually *slower* than direct serial because of the backend bridge overhead (0.044-0.078s vs 0.019-0.027s for serial float of similar size).
+
+#### C1. Double codec kernels
+
+**Files**: `src/metal_zfp/pack_unpack.metal`, `src/metal_zfp/metal_runtime.mm`, `src/metal_zfp/metal_backend.mm`
+
+- Port `zfp_encode_block_*d_float` / `zfp_decode_block_*d_float` to double.
+- Key differences:
+  - `zfp_exponent_float` -> 11-bit exponent extraction for double.
+  - Quantization scale: `ldexp(1.0, 62 - emax)` instead of `ldexp(1.0f, 30 - emax)`.
+  - Integer representation becomes 64-bit (`long` in MSL), requiring wider lifting transforms.
+  - Bit-writer needs to handle 64-bit unsigned values in the bitplane loop.
+- Add PSOs and runtime dispatch analogous to float path.
+- Add dispatch cases in `metal_backend.mm` for `zfp_type_double`.
+
+**Expected impact**: Eliminates serial fallback for double. Should achieve similar speedup ratios as float.
+
+#### C2. Int32/int64 codec kernels
+
+**Files**: same as C1
+
+- Integer types skip the float-to-fixed-point conversion and exponent coding.
+- The block encoder for integers: no exponent header, direct lifting transform on input values, then embedded coding.
+- Simpler than float; can reuse most of the encoder infrastructure.
+
+**Expected impact**: Lower priority since int test arrays are small (fast already). Completes coverage.
+
+### 14.4 Phase D: Advanced / speculative optimizations (lower priority)
+
+#### D1. Indirect command buffers for multi-field batching
+
+- If the application compresses multiple fields in sequence, an `MTLIndirectCommandBuffer` could encode all dispatches up front and execute them with a single GPU submission.
+- Requires API changes (batch-compress entry point). Out of scope for current correctness-first approach.
+
+#### D2. Asynchronous (non-blocking) dispatch
+
+- Currently `waitUntilCompleted` blocks the CPU. For streaming use cases, the CPU could prepare the next field while the GPU processes the current one.
+- Requires signaling infrastructure (semaphores, completion handlers).
+- Significant API/lifetime complexity; defer until host overhead is reduced.
+
+#### D3. Shared memory tile loading for 2D/3D
+
+- Load a tile of source data into threadgroup shared memory using coalesced reads, then let each thread within the group access its block from shared memory.
+- Reduces device memory traffic for 2D/3D where blocks overlap in the memory layout due to padding.
+
+### 14.5 Implementation order and milestones
+
+| Step | Item | Files | Risk | Estimated effort |
+|------|------|-------|------|-----------------|
+| 1 | A1: Buffer reuse | `metal_runtime.mm` | Low | 0.5 day |
+| 2 | A2: GPU zero-fill | `metal_runtime.mm`, `pack_unpack.metal` | Low | 0.5 day |
+| 3 | A3: Single command buffer | `metal_runtime.mm` | Low | 0.5 day |
+| 4 | Measure & snapshot | `run_perf_suite.py` | None | 0.25 day |
+| 5 | B1: Rate-specialized PSOs | `metal_runtime.mm` | Medium | 0.5 day |
+| 6 | B3: Inner encoder optimization | `pack_unpack.metal` | Medium | 2 days |
+| 7 | Measure & snapshot | `run_perf_suite.py` | None | 0.25 day |
+| 8 | C1: Double codec kernels | all three | Medium | 3 days |
+| 9 | C2: Int32/int64 kernels | all three | Low | 2 days |
+| 10 | B2: SIMD-group cooperation | `pack_unpack.metal` | High | 2 days |
+
+**Total estimated effort: ~12 days**
+
+### 14.6 Success criteria
+
+1. **2D/3D float compress must beat serial CPU** (currently 0.52-0.56x; target >= 1.5x).
+2. **Decompress should match or exceed the historical best** from `perf-native-float-rateopt.json` (1D: 3.4 GB/s, 2D: 3.1 GB/s, 3D: 2.5 GB/s).
+3. **All 14 correctness tests remain passing** after every change.
+4. **Double/int types run on GPU** without serial fallback (Phase C).
+5. **No performance regressions** on any path vs current baseline (within measurement noise of +/- 5%).
