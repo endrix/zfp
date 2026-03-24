@@ -377,75 +377,102 @@ static inline void zfp_inv_lift3(thread int* p)
 }
 
 struct ZfpBlockWriter1 {
+  device ulong* stream64;
   device atomic_uint* stream_atomic;
-  device uint* stream_plain;
-  ulong start_bit;
-  uint current_bit;
-  uint maxbits;
+  ulong buf;        /* 64-bit accumulation buffer */
+  uint buf_bits;    /* how many valid bits in buf (0..64) */
+  uint wi64;        /* current 64-bit word index in stream */
+  ulong start_bit;  /* absolute bit offset (for atomic mode) */
+  uint total_bits;  /* bits written so far */
   bool atomic_mode;
-  bool cache_valid;
-  uint cache_wi;
-  uint cache_val;
 };
 
 static inline ZfpBlockWriter1 zfp_make_writer1(device ulong* stream, uint maxbits, uint block_idx, bool atomic_mode)
 {
   ZfpBlockWriter1 w;
   ulong bit0 = (ulong)block_idx * (ulong)maxbits;
+  w.stream64 = stream;
   w.stream_atomic = reinterpret_cast<device atomic_uint*>(stream);
-  w.stream_plain = reinterpret_cast<device uint*>(stream);
-  w.start_bit = bit0;
-  w.current_bit = 0;
-  w.maxbits = maxbits;
   w.atomic_mode = atomic_mode;
-  w.cache_valid = false;
-  w.cache_wi = 0u;
-  w.cache_val = 0u;
+  w.start_bit = bit0;
+  w.total_bits = 0;
+
+  if (!atomic_mode) {
+    /* Align to 64-bit word boundary */
+    w.wi64 = (uint)(bit0 >> 6u);
+    uint bo = (uint)(bit0 & 63u);
+    w.buf = 0ul;
+    w.buf_bits = bo;
+  } else {
+    w.wi64 = 0;
+    w.buf = 0ul;
+    w.buf_bits = 0u;
+  }
   return w;
 }
 
 static inline void zfp_writer_flush(thread ZfpBlockWriter1& w)
 {
-  if (!w.atomic_mode && w.cache_valid) {
-    w.stream_plain[w.cache_wi] = w.stream_plain[w.cache_wi] | w.cache_val;
-    w.cache_valid = false;
-    w.cache_val = 0u;
+  if (!w.atomic_mode && w.buf_bits > 0u) {
+    w.stream64[w.wi64] |= w.buf;
+    w.buf = 0ul;
   }
 }
 
 static inline ulong zfp_writer_write_bits(thread ZfpBlockWriter1& w, ulong bits, uint nbits)
 {
-  ulong keep = bits & ((nbits == 64u) ? ~0ul : ((1ul << nbits) - 1ul));
-  uint remaining = nbits;
-  ulong pos = w.start_bit + (ulong)w.current_bit;
-  while (remaining) {
-    uint wi = (uint)(pos >> 5u);
-    uint bo = (uint)(pos & 31u);
-    uint chunk = min(remaining, 32u - bo);
-    ulong cmask = (chunk == 64u) ? ~0ul : ((chunk == 32u) ? 0xfffffffful : ((1ul << chunk) - 1ul));
-    uint part = (uint)((keep & cmask) << bo);
-    if (w.atomic_mode)
-      atomic_fetch_or_explicit(&(w.stream_atomic[wi]), part, memory_order_relaxed);
-    else {
-      if (!w.cache_valid || w.cache_wi != wi) {
-        zfp_writer_flush(w);
-        w.cache_valid = true;
-        w.cache_wi = wi;
-        w.cache_val = 0u;
-      }
-      w.cache_val |= part;
+  if (nbits == 0u) return bits;
+  ulong keep = bits & ((nbits >= 64u) ? ~0ul : ((1ul << nbits) - 1ul));
+
+  if (!w.atomic_mode) {
+    /* Fast path: accumulate into 64-bit buffer */
+    w.buf |= (keep << w.buf_bits);
+    w.buf_bits += nbits;
+    if (w.buf_bits >= 64u) {
+      w.stream64[w.wi64] |= w.buf;
+      w.wi64 += 1u;
+      uint overflow = w.buf_bits - 64u;
+      /* The bits that overflowed into the next word */
+      w.buf = (overflow > 0u) ? (keep >> (nbits - overflow)) : 0ul;
+      w.buf_bits = overflow;
     }
-    keep >>= chunk;
-    remaining -= chunk;
-    pos += chunk;
+  } else {
+    /* Atomic path: write 32-bit chunks via atomic OR */
+    ulong pos = w.start_bit + (ulong)w.total_bits;
+    uint remaining = nbits;
+    ulong val = keep;
+    while (remaining) {
+      uint wi32 = (uint)(pos >> 5u);
+      uint bo = (uint)(pos & 31u);
+      uint chunk = min(remaining, 32u - bo);
+      ulong cmask = (chunk >= 32u) ? 0xfffffffful : ((1ul << chunk) - 1ul);
+      uint part = (uint)((val & cmask) << bo);
+      atomic_fetch_or_explicit(&(w.stream_atomic[wi32]), part, memory_order_relaxed);
+      val >>= chunk;
+      remaining -= chunk;
+      pos += chunk;
+    }
   }
-  w.current_bit += nbits;
+
+  w.total_bits += nbits;
   return bits >> nbits;
 }
 
 static inline uint zfp_writer_write_bit(thread ZfpBlockWriter1& w, uint bit)
 {
-  zfp_writer_write_bits(w, (ulong)(bit & 1u), 1u);
+  if (!w.atomic_mode) {
+    w.buf |= (ulong)(bit & 1u) << w.buf_bits;
+    w.buf_bits += 1u;
+    if (w.buf_bits >= 64u) {
+      w.stream64[w.wi64] |= w.buf;
+      w.wi64 += 1u;
+      w.buf = 0ul;
+      w.buf_bits = 0u;
+    }
+    w.total_bits += 1u;
+  } else {
+    zfp_writer_write_bits(w, (ulong)(bit & 1u), 1u);
+  }
   return bit & 1u;
 }
 
@@ -738,8 +765,36 @@ static inline void zfp_encode_block_3d_float(thread float* fblock, uint maxbits,
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
-    for (; n < 64u && bits && (bits--, zfp_writer_write_bit(w, x ? 1u : 0u)); x >>= 1u, n++) {
-      for (; n < 63u && bits && (bits--, !zfp_writer_write_bit(w, (uint)(x & 1ul))); x >>= 1u, n++) {
+    while (n < 64u && bits) {
+      bits--;
+      if (!x) {
+        zfp_writer_write_bit(w, 0u);
+        break;
+      }
+      zfp_writer_write_bit(w, 1u); /* group test: significant bits remain */
+      /* Find run of zeros before next significant coefficient */
+      uint z = (uint)ctz(x);
+      uint inner_max = min(63u - n, bits);
+      uint run = min(z, inner_max);
+      if (run > 0u) {
+        zfp_writer_write_bits(w, 0ul, run);
+        bits -= run;
+      }
+      if (z <= inner_max) {
+        /* Found the coefficient within budget */
+        if (z < 63u - n && bits) {
+          bits--;
+          zfp_writer_write_bit(w, 1u);
+        }
+        x >>= z + 1u;
+        n += z + 1u;
+      } else {
+        /* Ran out of inner budget (n reached 63 or bits exhausted) */
+        x >>= run;
+        n += run;
+        /* The coefficient at position n is implicitly significant */
+        x >>= 1u;
+        n++;
       }
     }
   }
