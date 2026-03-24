@@ -835,6 +835,93 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
 }
 
 extern "C" size_t
+zfp_metal_encode1d_double_runtime(const double* src,
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes)
+{
+  /* Metal does not support double-precision; fall through to CPU. */
+  (void)src; (void)dim; (void)sx; (void)maxbits;
+  (void)stream_words; (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode1d_double_runtime(const void* stream_words,
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  double* dst)
+{
+  (void)stream_words; (void)dim; (void)sx; (void)maxbits; (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode2d_double_runtime(const double* src,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes)
+{
+  (void)src; (void)nx; (void)ny; (void)sx; (void)sy; (void)maxbits;
+  (void)stream_words; (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode2d_double_runtime(const void* stream_words,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  double* dst)
+{
+  (void)stream_words; (void)nx; (void)ny; (void)sx; (void)sy;
+  (void)maxbits; (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode3d_double_runtime(const double* src,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes)
+{
+  (void)src; (void)nx; (void)ny; (void)nz; (void)sx; (void)sy; (void)sz;
+  (void)maxbits; (void)stream_words; (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode3d_double_runtime(const void* stream_words,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  double* dst)
+{
+  (void)stream_words; (void)nx; (void)ny; (void)nz;
+  (void)sx; (void)sy; (void)sz; (void)maxbits; (void)dst;
+  return 0;
+}
+
+extern "C" size_t
 zfp_metal_host_encode2d_float(void* zfp,
                               const float* src,
                               unsigned int nx,
@@ -1245,6 +1332,126 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
                                  ptrdiff_t sz,
                                  unsigned int maxbits,
                                  float* dst)
+{
+  (void)stream_words;
+  (void)nx;
+  (void)ny;
+  (void)nz;
+  (void)sx;
+  (void)sy;
+  (void)sz;
+  (void)maxbits;
+  (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode1d_double_runtime(const double* src,
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes)
+{
+  (void)src;
+  (void)dim;
+  (void)sx;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode1d_double_runtime(const void* stream_words,
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  double* dst)
+{
+  (void)stream_words;
+  (void)dim;
+  (void)sx;
+  (void)maxbits;
+  (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode2d_double_runtime(const double* src,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes)
+{
+  (void)src;
+  (void)nx;
+  (void)ny;
+  (void)sx;
+  (void)sy;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode2d_double_runtime(const void* stream_words,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  double* dst)
+{
+  (void)stream_words;
+  (void)nx;
+  (void)ny;
+  (void)sx;
+  (void)sy;
+  (void)maxbits;
+  (void)dst;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode3d_double_runtime(const double* src,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes)
+{
+  (void)src;
+  (void)nx;
+  (void)ny;
+  (void)nz;
+  (void)sx;
+  (void)sy;
+  (void)sz;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode3d_double_runtime(const void* stream_words,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  double* dst)
 {
   (void)stream_words;
   (void)nx;
