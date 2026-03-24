@@ -1236,21 +1236,39 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
     size_t span_bytes;
     size_t bytes;
     int dim;
+    size_t data_span_bytes;
+    size_t data_offset_bytes;
 
     if (!elem_size)
       return 0;
     if (!zfp_is_contiguous_3d(dims, stride, &offset))
       return 0;
 
-    if (field->type == zfp_type_float && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    /* Compute buffer base, span, and offset for stride support.
+       offset is the lowest index (negative for reversed arrays).
+       base_ptr = field->data + offset (lowest memory address).
+       data_offset_bytes = how far into the buffer the logical pointer sits. */
+    if (!zfp_layout_bounds_3d(dims, stride, &imin, &imax))
+      return 0;
+    elem_count = zfp_elem_count_3d(dims);
+    span_elems = (size_t)(imax - imin + 1);
+    data_span_bytes = span_elems * elem_size;
+    data_offset_bytes = (size_t)(-imin) * elem_size;
+    base = zfp_offset_void(field->type, field->data, imin);
+    if (!base)
+      return 0;
+
+    if (field->type == zfp_type_float && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
-      size_t got = zfp_metal_encode1d_float_runtime((const float*)field->data,
-                                                    dims[0],
-                                                    (int)stride[0],
-                                                    (uint)stream->maxbits,
-                                                    stream_data(stream->stream),
-                                                    stream_bytes);
+      size_t got = zfp_metal_encode1d_float_runtime((const float*)base,
+                                                     dims[0],
+                                                     (int)stride[0],
+                                                     (uint)stream->maxbits,
+                                                     stream_data(stream->stream),
+                                                     stream_bytes,
+                                                     data_span_bytes,
+                                                     data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode1d_float((const float*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits, stream_data(stream->stream), stream_bytes);
       if (got) {
@@ -1261,21 +1279,22 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_float && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_float && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t blocks = (px * py) / 16u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode2d_float_runtime((const float*)field->data,
-                                                    dims[0],
-                                                    dims[1],
-                                                    stride[0],
-                                                    stride[1],
-                                                    (uint)stream->maxbits,
-                                                    stream_data(stream->stream),
-                                                    stream_bytes);
+      size_t got = zfp_metal_encode2d_float_runtime((const float*)base,
+                                                     dims[0],
+                                                     dims[1],
+                                                     stride[0],
+                                                     stride[1],
+                                                     (uint)stream->maxbits,
+                                                     stream_data(stream->stream),
+                                                     stream_bytes,
+                                                     data_span_bytes,
+                                                     data_offset_bytes);
       if (!got)
         got = zfp_metal_host_encode2d_float(stream,
                                             (const float*)field->data,
@@ -1303,24 +1322,25 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_float && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_float && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t pz = (dims[2] + 3u) & ~3u;
       size_t blocks = (px * py * pz) / 64u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode3d_float_runtime((const float*)field->data,
-                                                    dims[0],
-                                                    dims[1],
-                                                    dims[2],
-                                                    stride[0],
-                                                    stride[1],
-                                                    stride[2],
-                                                    (uint)stream->maxbits,
-                                                    stream_data(stream->stream),
-                                                    stream_bytes);
+      size_t got = zfp_metal_encode3d_float_runtime((const float*)base,
+                                                     dims[0],
+                                                     dims[1],
+                                                     dims[2],
+                                                     stride[0],
+                                                     stride[1],
+                                                     stride[2],
+                                                     (uint)stream->maxbits,
+                                                     stream_data(stream->stream),
+                                                     stream_bytes,
+                                                     data_span_bytes,
+                                                     data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode3d_float((const float*)field->data,
                                           dims[0],
@@ -1340,15 +1360,17 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_double && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    if (field->type == zfp_type_double && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
-      size_t got = zfp_metal_encode1d_double_runtime((const double*)field->data,
-                                                     dims[0],
-                                                     (int)stride[0],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode1d_double_runtime((const double*)base,
+                                                      dims[0],
+                                                      (int)stride[0],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode1d_double((const double*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits, stream_data(stream->stream), stream_bytes);
       if (got) {
@@ -1359,30 +1381,31 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_double && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_double && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t blocks = (px * py) / 16u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode2d_double_runtime((const double*)field->data,
-                                                     dims[0],
-                                                     dims[1],
-                                                     stride[0],
-                                                     stride[1],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode2d_double_runtime((const double*)base,
+                                                      dims[0],
+                                                      dims[1],
+                                                      stride[0],
+                                                      stride[1],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode2d_double((const double*)field->data,
-                                           dims[0],
-                                           dims[1],
-                                           stride[0],
-                                           stride[1],
-                                           (uint)stream->maxbits,
-                                           stream_data(stream->stream),
-                                           stream_bytes);
+                                            dims[0],
+                                            dims[1],
+                                            stride[0],
+                                            stride[1],
+                                            (uint)stream->maxbits,
+                                            stream_data(stream->stream),
+                                            stream_bytes);
       if (got) {
         stream_wseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
         stream_flush(stream->stream);
@@ -1391,35 +1414,36 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_double && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_double && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t pz = (dims[2] + 3u) & ~3u;
       size_t blocks = (px * py * pz) / 64u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode3d_double_runtime((const double*)field->data,
-                                                     dims[0],
-                                                     dims[1],
-                                                     dims[2],
-                                                     stride[0],
-                                                     stride[1],
-                                                     stride[2],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode3d_double_runtime((const double*)base,
+                                                      dims[0],
+                                                      dims[1],
+                                                      dims[2],
+                                                      stride[0],
+                                                      stride[1],
+                                                      stride[2],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode3d_double((const double*)field->data,
-                                           dims[0],
-                                           dims[1],
-                                           dims[2],
-                                           stride[0],
-                                           stride[1],
-                                           stride[2],
-                                           (uint)stream->maxbits,
-                                           stream_data(stream->stream),
-                                           stream_bytes);
+                                            dims[0],
+                                            dims[1],
+                                            dims[2],
+                                            stride[0],
+                                            stride[1],
+                                            stride[2],
+                                            (uint)stream->maxbits,
+                                            stream_data(stream->stream),
+                                            stream_bytes);
       if (got) {
         stream_wseek(stream->stream, (bitstream_offset)(got * CHAR_BIT));
         stream_flush(stream->stream);
@@ -1428,15 +1452,17 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int32 && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    if (field->type == zfp_type_int32 && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
-      size_t got = zfp_metal_encode1d_int32_runtime((const int32*)field->data,
-                                                     dims[0],
-                                                     (int)stride[0],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode1d_int32_runtime((const int32*)base,
+                                                      dims[0],
+                                                      (int)stride[0],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode1d_int32((const int32*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits, stream_data(stream->stream), stream_bytes);
       if (got) {
@@ -1447,21 +1473,22 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int32 && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_int32 && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t blocks = (px * py) / 16u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode2d_int32_runtime((const int32*)field->data,
-                                                     dims[0],
-                                                     dims[1],
-                                                     stride[0],
-                                                     stride[1],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode2d_int32_runtime((const int32*)base,
+                                                      dims[0],
+                                                      dims[1],
+                                                      stride[0],
+                                                      stride[1],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode2d_int32((const int32*)field->data,
                                           dims[0],
@@ -1479,24 +1506,25 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int32 && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_int32 && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t pz = (dims[2] + 3u) & ~3u;
       size_t blocks = (px * py * pz) / 64u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode3d_int32_runtime((const int32*)field->data,
-                                                     dims[0],
-                                                     dims[1],
-                                                     dims[2],
-                                                     stride[0],
-                                                     stride[1],
-                                                     stride[2],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode3d_int32_runtime((const int32*)base,
+                                                      dims[0],
+                                                      dims[1],
+                                                      dims[2],
+                                                      stride[0],
+                                                      stride[1],
+                                                      stride[2],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode3d_int32((const int32*)field->data,
                                           dims[0],
@@ -1516,15 +1544,17 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int64 && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    if (field->type == zfp_type_int64 && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
-      size_t got = zfp_metal_encode1d_int64_runtime((const int64*)field->data,
-                                                     dims[0],
-                                                     (int)stride[0],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode1d_int64_runtime((const int64*)base,
+                                                      dims[0],
+                                                      (int)stride[0],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode1d_int64((const int64*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits, stream_data(stream->stream), stream_bytes);
       if (got) {
@@ -1535,21 +1565,22 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int64 && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t blocks = (px * py) / 16u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode2d_int64_runtime((const int64*)field->data,
-                                                     dims[0],
-                                                     dims[1],
-                                                     stride[0],
-                                                     stride[1],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode2d_int64_runtime((const int64*)base,
+                                                      dims[0],
+                                                      dims[1],
+                                                      stride[0],
+                                                      stride[1],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode2d_int64((const int64*)field->data,
                                           dims[0],
@@ -1567,24 +1598,25 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int64 && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t px = (dims[0] + 3u) & ~3u;
       size_t py = (dims[1] + 3u) & ~3u;
       size_t pz = (dims[2] + 3u) & ~3u;
       size_t blocks = (px * py * pz) / 64u;
       size_t stream_bytes = (blocks * (size_t)stream->maxbits + 7u) / 8u;
-      size_t got = zfp_metal_encode3d_int64_runtime((const int64*)field->data,
-                                                     dims[0],
-                                                     dims[1],
-                                                     dims[2],
-                                                     stride[0],
-                                                     stride[1],
-                                                     stride[2],
-                                                     (uint)stream->maxbits,
-                                                     stream_data(stream->stream),
-                                                     stream_bytes);
+      size_t got = zfp_metal_encode3d_int64_runtime((const int64*)base,
+                                                      dims[0],
+                                                      dims[1],
+                                                      dims[2],
+                                                      stride[0],
+                                                      stride[1],
+                                                      stride[2],
+                                                      (uint)stream->maxbits,
+                                                      stream_data(stream->stream),
+                                                      stream_bytes,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got)
         got = zfp_fallback_encode3d_int64((const int64*)field->data,
                                           dims[0],
@@ -1604,43 +1636,38 @@ zfp_gpu_compress(zfp_stream* stream, const zfp_field* field)
 #endif
     }
 
-    if (!(stride[0] == 1 &&
-          stride[1] == (ptrdiff_t)dims[0] &&
-          stride[2] == (ptrdiff_t)(dims[0] * dims[1]))) {
+    /* Fallback: pack + serial compress for unsupported codec paths */
+    dim = zfp_dim_count_3d(dims);
+    packed_bytes = elem_count * elem_size;
+    span_bytes = span_elems * elem_size;
+
+    if (stride[0] == 1 &&
+        stride[1] == (ptrdiff_t)dims[0] &&
+        stride[2] == (ptrdiff_t)(dims[0] * dims[1])) {
+      /* Standard contiguous layout: try GPU encode_contiguous or pack */
+      packed = malloc(packed_bytes);
+      if (!packed)
+        return 0;
+
+      if (!zfp_metal_encode_contiguous_runtime(base, span_bytes, packed, packed_bytes, elem_size, dim) &&
+          !zfp_metal_pack_runtime(base, span_bytes, packed, dims, stride, imin, elem_size)) {
+        zfp_metal_warn_once("native Metal pack failed; using CPU packing fallback");
+        zfp_pack_cpu(base, packed, dims, stride, imin, elem_size);
+      }
+
+      bytes = zfp_compress_serial_from_buffer(stream, field, packed);
+      free(packed);
+      return bytes;
+    }
+
+    /* Non-standard stride that wasn't handled by codec: serial fallback */
+    {
       zfp_exec_policy saved_policy = zfp_stream_execution(stream);
-      size_t bytes;
       zfp_stream_set_execution(stream, zfp_exec_serial);
       bytes = zfp_compress(stream, field);
       zfp_stream_set_execution(stream, saved_policy);
       return bytes;
     }
-
-    if (!zfp_layout_bounds_3d(dims, stride, &imin, &imax))
-      return 0;
-
-    elem_count = zfp_elem_count_3d(dims);
-    dim = zfp_dim_count_3d(dims);
-    span_elems = (size_t)(imax - imin + 1);
-    packed_bytes = elem_count * elem_size;
-    span_bytes = span_elems * elem_size;
-    offset = imin;
-    base = zfp_offset_void(field->type, field->data, offset);
-    if (!base)
-      return 0;
-
-    packed = malloc(packed_bytes);
-    if (!packed)
-      return 0;
-
-    if (!zfp_metal_encode_contiguous_runtime(base, span_bytes, packed, packed_bytes, elem_size, dim) &&
-        !zfp_metal_pack_runtime(base, span_bytes, packed, dims, stride, offset, elem_size)) {
-      zfp_metal_warn_once("native Metal pack failed; using CPU packing fallback");
-      zfp_pack_cpu(base, packed, dims, stride, offset, elem_size);
-    }
-
-    bytes = zfp_compress_serial_from_buffer(stream, field, packed);
-    free(packed);
-    return bytes;
   }
 #endif
 }
@@ -1680,19 +1707,37 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
     size_t packed_bytes;
     size_t span_bytes;
     int dim;
+    size_t data_span_bytes;
+    size_t data_offset_bytes;
 
     if (!elem_size)
       return;
     if (!zfp_is_contiguous_3d(dims, stride, &offset))
       return;
 
-    if (field->type == zfp_type_float && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    /* Compute buffer base, span, and offset for stride support.
+       imin is the lowest index (negative for reversed arrays).
+       base = field->data + imin (lowest memory address).
+       data_offset_bytes = how far into the buffer the logical pointer sits. */
+    if (!zfp_layout_bounds_3d(dims, stride, &imin, &imax))
+      return;
+    elem_count = zfp_elem_count_3d(dims);
+    span_elems = (size_t)(imax - imin + 1);
+    data_span_bytes = span_elems * elem_size;
+    data_offset_bytes = (size_t)(-imin) * elem_size;
+    base = zfp_offset_void(field->type, field->data, imin);
+    if (!base)
+      return;
+
+    if (field->type == zfp_type_float && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode1d_float_runtime(stream_data(stream->stream),
-                                                    dims[0],
-                                                    (int)stride[0],
-                                                    (uint)stream->maxbits,
-                                                    (float*)field->data);
+                                                     dims[0],
+                                                     (int)stride[0],
+                                                     (uint)stream->maxbits,
+                                                     (float*)base,
+                                                     data_span_bytes,
+                                                     data_offset_bytes);
       if (!got) {
         size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
         if (zfp_fallback_decode1d_float(stream_data(stream->stream), stream_bytes, (float*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits))
@@ -1705,16 +1750,17 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_float && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_float && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode2d_float_runtime(stream_data(stream->stream),
-                                                    dims[0],
-                                                    dims[1],
-                                                    stride[0],
-                                                    stride[1],
-                                                    (uint)stream->maxbits,
-                                                    (float*)field->data);
+                                                     dims[0],
+                                                     dims[1],
+                                                     stride[0],
+                                                     stride[1],
+                                                     (uint)stream->maxbits,
+                                                     (float*)base,
+                                                     data_span_bytes,
+                                                     data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -1753,18 +1799,19 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_float && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_float && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode3d_float_runtime(stream_data(stream->stream),
-                                                    dims[0],
-                                                    dims[1],
-                                                    dims[2],
-                                                    stride[0],
-                                                    stride[1],
-                                                    stride[2],
-                                                    (uint)stream->maxbits,
-                                                    (float*)field->data);
+                                                     dims[0],
+                                                     dims[1],
+                                                     dims[2],
+                                                     stride[0],
+                                                     stride[1],
+                                                     stride[2],
+                                                     (uint)stream->maxbits,
+                                                     (float*)base,
+                                                     data_span_bytes,
+                                                     data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -1790,13 +1837,15 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_double && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    if (field->type == zfp_type_double && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode1d_double_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     (int)stride[0],
-                                                     (uint)stream->maxbits,
-                                                     (double*)field->data);
+                                                      dims[0],
+                                                      (int)stride[0],
+                                                      (uint)stream->maxbits,
+                                                      (double*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
         if (zfp_fallback_decode1d_double(stream_data(stream->stream), stream_bytes, (double*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits))
@@ -1809,16 +1858,17 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_double && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_double && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode2d_double_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     dims[1],
-                                                     stride[0],
-                                                     stride[1],
-                                                     (uint)stream->maxbits,
-                                                     (double*)field->data);
+                                                      dims[0],
+                                                      dims[1],
+                                                      stride[0],
+                                                      stride[1],
+                                                      (uint)stream->maxbits,
+                                                      (double*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -1841,18 +1891,19 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_double && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_double && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode3d_double_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     dims[1],
-                                                     dims[2],
-                                                     stride[0],
-                                                     stride[1],
-                                                     stride[2],
-                                                     (uint)stream->maxbits,
-                                                     (double*)field->data);
+                                                      dims[0],
+                                                      dims[1],
+                                                      dims[2],
+                                                      stride[0],
+                                                      stride[1],
+                                                      stride[2],
+                                                      (uint)stream->maxbits,
+                                                      (double*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -1878,13 +1929,15 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int32 && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    if (field->type == zfp_type_int32 && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode1d_int32_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     (int)stride[0],
-                                                     (uint)stream->maxbits,
-                                                     (int32*)field->data);
+                                                      dims[0],
+                                                      (int)stride[0],
+                                                      (uint)stream->maxbits,
+                                                      (int32*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
         if (zfp_fallback_decode1d_int32(stream_data(stream->stream), stream_bytes, (int32*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits))
@@ -1897,16 +1950,17 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int32 && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_int32 && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode2d_int32_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     dims[1],
-                                                     stride[0],
-                                                     stride[1],
-                                                     (uint)stream->maxbits,
-                                                     (int32*)field->data);
+                                                      dims[0],
+                                                      dims[1],
+                                                      stride[0],
+                                                      stride[1],
+                                                      (uint)stream->maxbits,
+                                                      (int32*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -1929,18 +1983,19 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int32 && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_int32 && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode3d_int32_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     dims[1],
-                                                     dims[2],
-                                                     stride[0],
-                                                     stride[1],
-                                                     stride[2],
-                                                     (uint)stream->maxbits,
-                                                     (int32*)field->data);
+                                                      dims[0],
+                                                      dims[1],
+                                                      dims[2],
+                                                      stride[0],
+                                                      stride[1],
+                                                      stride[2],
+                                                      (uint)stream->maxbits,
+                                                      (int32*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -1966,13 +2021,15 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int64 && dims[0] && !dims[1] && !dims[2] && stride[0] == 1) {
+    if (field->type == zfp_type_int64 && dims[0] && !dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode1d_int64_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     (int)stride[0],
-                                                     (uint)stream->maxbits,
-                                                     (int64*)field->data);
+                                                      dims[0],
+                                                      (int)stride[0],
+                                                      (uint)stream->maxbits,
+                                                      (int64*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t stream_bytes = zfp_calc_stream_bytes_1d(dims[0], (uint)stream->maxbits);
         if (zfp_fallback_decode1d_int64(stream_data(stream->stream), stream_bytes, (int64*)field->data, dims[0], (int)stride[0], (uint)stream->maxbits))
@@ -1985,16 +2042,17 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int64 && dims[0] && dims[1] && !dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0]) {
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && !dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode2d_int64_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     dims[1],
-                                                     stride[0],
-                                                     stride[1],
-                                                     (uint)stream->maxbits,
-                                                     (int64*)field->data);
+                                                      dims[0],
+                                                      dims[1],
+                                                      stride[0],
+                                                      stride[1],
+                                                      (uint)stream->maxbits,
+                                                      (int64*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -2017,18 +2075,19 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (field->type == zfp_type_int64 && dims[0] && dims[1] && dims[2] &&
-        stride[0] == 1 && stride[1] >= (ptrdiff_t)dims[0] && stride[2] >= (ptrdiff_t)(dims[0] * dims[1])) {
+    if (field->type == zfp_type_int64 && dims[0] && dims[1] && dims[2]) {
 #ifdef ZFP_WITH_METAL_CODEC_EXPERIMENTAL
       size_t got = zfp_metal_decode3d_int64_runtime(stream_data(stream->stream),
-                                                     dims[0],
-                                                     dims[1],
-                                                     dims[2],
-                                                     stride[0],
-                                                     stride[1],
-                                                     stride[2],
-                                                     (uint)stream->maxbits,
-                                                     (int64*)field->data);
+                                                      dims[0],
+                                                      dims[1],
+                                                      dims[2],
+                                                      stride[0],
+                                                      stride[1],
+                                                      stride[2],
+                                                      (uint)stream->maxbits,
+                                                      (int64*)base,
+                                                      data_span_bytes,
+                                                      data_offset_bytes);
       if (!got) {
         size_t px = (dims[0] + 3u) & ~3u;
         size_t py = (dims[1] + 3u) & ~3u;
@@ -2054,42 +2113,39 @@ zfp_gpu_decompress(zfp_stream* stream, zfp_field* field)
 #endif
     }
 
-    if (!(stride[0] == 1 &&
-          stride[1] == (ptrdiff_t)dims[0] &&
-          stride[2] == (ptrdiff_t)(dims[0] * dims[1]))) {
+    /* Fallback: serial decompress + unpack for unsupported codec paths */
+    dim = zfp_dim_count_3d(dims);
+    packed_bytes = elem_count * elem_size;
+    span_bytes = span_elems * elem_size;
+
+    if (stride[0] == 1 &&
+        stride[1] == (ptrdiff_t)dims[0] &&
+        stride[2] == (ptrdiff_t)(dims[0] * dims[1])) {
+      /* Standard contiguous layout: try GPU decode_contiguous or unpack */
+      packed = malloc(packed_bytes);
+      if (!packed)
+        return;
+
+      zfp_decompress_serial_to_buffer(stream, field, packed);
+
+      if (!zfp_metal_decode_contiguous_runtime(packed, packed_bytes, base, span_bytes, elem_size, dim) &&
+          !zfp_metal_unpack_runtime(packed, packed_bytes, base, span_bytes, dims, stride, imin, elem_size)) {
+        zfp_metal_warn_once("native Metal unpack failed; using CPU unpack fallback");
+        zfp_unpack_cpu(packed, base, dims, stride, imin, elem_size);
+      }
+
+      free(packed);
+      return;
+    }
+
+    /* Non-standard stride that wasn't handled by codec: serial fallback */
+    {
       zfp_exec_policy saved_policy = zfp_stream_execution(stream);
       zfp_stream_set_execution(stream, zfp_exec_serial);
       zfp_decompress(stream, field);
       zfp_stream_set_execution(stream, saved_policy);
       return;
     }
-
-    if (!zfp_layout_bounds_3d(dims, stride, &imin, &imax))
-      return;
-
-    elem_count = zfp_elem_count_3d(dims);
-    dim = zfp_dim_count_3d(dims);
-    span_elems = (size_t)(imax - imin + 1);
-    packed_bytes = elem_count * elem_size;
-    span_bytes = span_elems * elem_size;
-    offset = imin;
-    base = zfp_offset_void(field->type, field->data, offset);
-    if (!base)
-      return;
-
-    packed = malloc(packed_bytes);
-    if (!packed)
-      return;
-
-    zfp_decompress_serial_to_buffer(stream, field, packed);
-
-    if (!zfp_metal_decode_contiguous_runtime(packed, packed_bytes, base, span_bytes, elem_size, dim) &&
-        !zfp_metal_unpack_runtime(packed, packed_bytes, base, span_bytes, dims, stride, offset, elem_size)) {
-      zfp_metal_warn_once("native Metal unpack failed; using CPU unpack fallback");
-      zfp_unpack_cpu(packed, base, dims, stride, offset, elem_size);
-    }
-
-    free(packed);
   }
 #endif
 }

@@ -346,7 +346,9 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
                          const ZfpMetalCodec1dParams* params,
-                         size_t fill_dst_bytes)
+                         size_t fill_dst_bytes,
+                         size_t src_offset_bytes,
+                         size_t dst_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -368,8 +370,8 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
-  [enc setBuffer:src_buf offset:0 atIndex:0];
-  [enc setBuffer:dst_buf offset:0 atIndex:1];
+  [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
+  [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
   [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
 
   NSUInteger width = pso.threadExecutionWidth ? pso.threadExecutionWidth : 64;
@@ -469,7 +471,9 @@ zfp_metal_encode1d_int32_runtime(const int* src,
                                  int sx,
                                  unsigned int maxbits,
                                  void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                 size_t stream_capacity_bytes,
+                                 size_t data_span_bytes,
+                                 size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -486,16 +490,16 @@ zfp_metal_encode1d_int32_runtime(const int* src,
   unsigned int blocks = padded / 4u;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                    length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(int)
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:data_span_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                    length:stream_bytes
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -506,7 +510,7 @@ zfp_metal_encode1d_int32_runtime(const int* src,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.encode1d_int32_ps, src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.encode1d_int32_ps, src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -517,7 +521,9 @@ zfp_metal_decode1d_int32_runtime(const void* stream_words,
                                  unsigned int dim,
                                  int sx,
                                  unsigned int maxbits,
-                                 int* dst)
+                                 int* dst,
+                                 size_t data_span_bytes,
+                                 size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -532,16 +538,16 @@ zfp_metal_decode1d_int32_runtime(const void* stream_words,
   unsigned int blocks = padded / 4u;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                    length:stream_bytes
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                    length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(int)
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:data_span_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -552,7 +558,7 @@ zfp_metal_decode1d_int32_runtime(const void* stream_words,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.decode1d_int32_ps, src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.decode1d_int32_ps, src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -564,14 +570,18 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
                          const ZfpMetalCodec2dParams* params,
-                         size_t fill_dst_bytes);
+                         size_t fill_dst_bytes,
+                         size_t src_offset_bytes,
+                         size_t dst_offset_bytes);
 
 static int
 zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
                          const ZfpMetalCodec3dParams* params,
-                         size_t fill_dst_bytes);
+                         size_t fill_dst_bytes,
+                         size_t src_offset_bytes,
+                         size_t dst_offset_bytes);
 
 extern "C" size_t
 zfp_metal_encode2d_int32_runtime(const int* src,
@@ -581,7 +591,9 @@ zfp_metal_encode2d_int32_runtime(const int* src,
                                  ptrdiff_t sy,
                                  unsigned int maxbits,
                                  void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                 size_t stream_capacity_bytes,
+                                 size_t data_span_bytes,
+                                 size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -598,22 +610,17 @@ zfp_metal_encode2d_int32_runtime(const int* src,
   unsigned int by = py / 4u;
   unsigned int blocks = bx * by;
 
-  size_t src_len = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  if (row_span > src_len)
-    src_len = row_span;
-
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                    length:src_len * sizeof(int)
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:data_span_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                    length:stream_bytes
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -627,7 +634,7 @@ zfp_metal_encode2d_int32_runtime(const int* src,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.encode2d_int32_ps, src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.encode2d_int32_ps, src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -640,7 +647,9 @@ zfp_metal_decode2d_int32_runtime(const void* stream_words,
                                  ptrdiff_t sx,
                                  ptrdiff_t sy,
                                  unsigned int maxbits,
-                                 int* dst)
+                                 int* dst,
+                                 size_t data_span_bytes,
+                                 size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -656,21 +665,16 @@ zfp_metal_decode2d_int32_runtime(const void* stream_words,
   unsigned int blocks = bx * by;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                    length:stream_bytes
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!src_buf)
     return 0;
 
-  size_t dst_len = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  if (row_span > dst_len)
-    dst_len = row_span;
-
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                    length:dst_len * sizeof(int)
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:data_span_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -684,7 +688,7 @@ zfp_metal_decode2d_int32_runtime(const void* stream_words,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.decode2d_int32_ps, src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.decode2d_int32_ps, src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -700,7 +704,9 @@ zfp_metal_encode3d_int32_runtime(const int* src,
                                  ptrdiff_t sz,
                                  unsigned int maxbits,
                                  void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                 size_t stream_capacity_bytes,
+                                 size_t data_span_bytes,
+                                 size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -719,23 +725,17 @@ zfp_metal_encode3d_int32_runtime(const int* src,
   unsigned int bz = pz / 4u;
   unsigned int blocks = bx * by * bz;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
-  if (s2 > span) span = s2;
-  if (s3 > span) span = s3;
-
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                    length:span * sizeof(int)
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:data_span_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                    length:stream_bytes
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -752,7 +752,7 @@ zfp_metal_encode3d_int32_runtime(const int* src,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.encode3d_int32_ps, src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.encode3d_int32_ps, src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -767,7 +767,9 @@ zfp_metal_decode3d_int32_runtime(const void* stream_words,
                                  ptrdiff_t sy,
                                  ptrdiff_t sz,
                                  unsigned int maxbits,
-                                 int* dst)
+                                 int* dst,
+                                 size_t data_span_bytes,
+                                 size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -784,22 +786,16 @@ zfp_metal_decode3d_int32_runtime(const void* stream_words,
   unsigned int blocks = bx * by * bz;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                    length:stream_bytes
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:stream_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!src_buf)
     return 0;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
-  if (s2 > span) span = s2;
-  if (s3 > span) span = s3;
-
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                    length:span * sizeof(int)
-                                                                   options:MTLResourceStorageModeShared
-                                                               deallocator:nil];
+                                                                     length:data_span_bytes
+                                                                    options:MTLResourceStorageModeShared
+                                                                deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -816,7 +812,7 @@ zfp_metal_decode3d_int32_runtime(const void* stream_words,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.decode3d_int32_ps, src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.decode3d_int32_ps, src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -828,11 +824,13 @@ zfp_metal_decode3d_int32_runtime(const void* stream_words,
 
 extern "C" size_t
 zfp_metal_encode1d_int64_runtime(const long* src,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -849,16 +847,16 @@ zfp_metal_encode1d_int64_runtime(const long* src,
   unsigned int blocks = padded / 4u;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                     length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(long)
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:data_span_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                     length:stream_bytes
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:stream_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -869,7 +867,7 @@ zfp_metal_encode1d_int64_runtime(const long* src,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.encode1d_int64_ps, src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.encode1d_int64_ps, src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -877,10 +875,12 @@ zfp_metal_encode1d_int64_runtime(const long* src,
 
 extern "C" size_t
 zfp_metal_decode1d_int64_runtime(const void* stream_words,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 long* dst)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  long* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -895,16 +895,16 @@ zfp_metal_decode1d_int64_runtime(const void* stream_words,
   unsigned int blocks = padded / 4u;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                     length:stream_bytes
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:stream_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                     length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(long)
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:data_span_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -915,7 +915,7 @@ zfp_metal_decode1d_int64_runtime(const void* stream_words,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.decode1d_int64_ps, src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec1d(zfp_metal_ctx.decode1d_int64_ps, src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -923,13 +923,15 @@ zfp_metal_decode1d_int64_runtime(const void* stream_words,
 
 extern "C" size_t
 zfp_metal_encode2d_int64_runtime(const long* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -946,22 +948,17 @@ zfp_metal_encode2d_int64_runtime(const long* src,
   unsigned int by = py / 4u;
   unsigned int blocks = bx * by;
 
-  size_t src_len = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  if (row_span > src_len)
-    src_len = row_span;
-
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                     length:src_len * sizeof(long)
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:data_span_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                     length:stream_bytes
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:stream_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -975,7 +972,7 @@ zfp_metal_encode2d_int64_runtime(const long* src,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.encode2d_int64_ps, src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.encode2d_int64_ps, src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -983,12 +980,14 @@ zfp_metal_encode2d_int64_runtime(const long* src,
 
 extern "C" size_t
 zfp_metal_decode2d_int64_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 long* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  long* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1004,21 +1003,16 @@ zfp_metal_decode2d_int64_runtime(const void* stream_words,
   unsigned int blocks = bx * by;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                     length:stream_bytes
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:stream_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!src_buf)
     return 0;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  if (row_span > span)
-    span = row_span;
-
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                     length:span * sizeof(long)
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:data_span_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1032,7 +1026,7 @@ zfp_metal_decode2d_int64_runtime(const void* stream_words,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.decode2d_int64_ps, src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec2d(zfp_metal_ctx.decode2d_int64_ps, src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -1040,15 +1034,17 @@ zfp_metal_decode2d_int64_runtime(const void* stream_words,
 
 extern "C" size_t
 zfp_metal_encode3d_int64_runtime(const long* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1067,23 +1063,17 @@ zfp_metal_encode3d_int64_runtime(const long* src,
   unsigned int bz = pz / 4u;
   unsigned int blocks = bx * by * bz;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
-  if (s2 > span) span = s2;
-  if (s3 > span) span = s3;
-
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                     length:span * sizeof(long)
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:data_span_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                     length:stream_bytes
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:stream_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1100,7 +1090,7 @@ zfp_metal_encode3d_int64_runtime(const long* src,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.encode3d_int64_ps, src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.encode3d_int64_ps, src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -1108,14 +1098,16 @@ zfp_metal_encode3d_int64_runtime(const long* src,
 
 extern "C" size_t
 zfp_metal_decode3d_int64_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 long* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  long* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1132,22 +1124,16 @@ zfp_metal_decode3d_int64_runtime(const void* stream_words,
   unsigned int blocks = bx * by * bz;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                     length:stream_bytes
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:stream_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!src_buf)
     return 0;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
-  if (s2 > span) span = s2;
-  if (s3 > span) span = s3;
-
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                     length:span * sizeof(long)
-                                                                    options:MTLResourceStorageModeShared
-                                                                deallocator:nil];
+                                                                      length:data_span_bytes
+                                                                     options:MTLResourceStorageModeShared
+                                                                 deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1164,7 +1150,7 @@ zfp_metal_decode3d_int64_runtime(const void* stream_words,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.decode3d_int64_ps, src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec3d(zfp_metal_ctx.decode3d_int64_ps, src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -1172,11 +1158,13 @@ zfp_metal_decode3d_int64_runtime(const void* stream_words,
 
 extern "C" size_t
 zfp_metal_encode1d_float_runtime(const float* src,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1191,16 +1179,16 @@ zfp_metal_encode1d_float_runtime(const float* src,
   unsigned int blocks = padded / 4u;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                   length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(float)
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:data_span_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                   length:stream_bytes
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:stream_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1211,7 +1199,7 @@ zfp_metal_encode1d_float_runtime(const float* src,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -1219,10 +1207,12 @@ zfp_metal_encode1d_float_runtime(const float* src,
 
 extern "C" size_t
 zfp_metal_decode1d_float_runtime(const void* stream_words,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 float* dst)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  float* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1235,16 +1225,16 @@ zfp_metal_decode1d_float_runtime(const void* stream_words,
   unsigned int blocks = padded / 4u;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                   length:stream_bytes
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:stream_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                   length:(size_t)dim * (size_t)(sx > 0 ? sx : -sx) * sizeof(float)
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:data_span_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1255,7 +1245,7 @@ zfp_metal_decode1d_float_runtime(const void* stream_words,
   params.padded_dim = padded;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_decode_pso(maxbits), src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec1d(zfp_metal_select_1d_decode_pso(maxbits), src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -1266,7 +1256,9 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
                          const ZfpMetalCodec2dParams* params,
-                         size_t fill_dst_bytes)
+                         size_t fill_dst_bytes,
+                         size_t src_offset_bytes,
+                         size_t dst_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1288,8 +1280,8 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
-  [enc setBuffer:src_buf offset:0 atIndex:0];
-  [enc setBuffer:dst_buf offset:0 atIndex:1];
+  [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
+  [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
   [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
 
   NSUInteger width = pso.threadExecutionWidth ? pso.threadExecutionWidth : 64;
@@ -1313,7 +1305,9 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
                          id<MTLBuffer> src_buf,
                          id<MTLBuffer> dst_buf,
                          const ZfpMetalCodec3dParams* params,
-                         size_t fill_dst_bytes)
+                         size_t fill_dst_bytes,
+                         size_t src_offset_bytes,
+                         size_t dst_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1335,8 +1329,8 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
-  [enc setBuffer:src_buf offset:0 atIndex:0];
-  [enc setBuffer:dst_buf offset:0 atIndex:1];
+  [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
+  [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
   [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
 
   NSUInteger width = pso.threadExecutionWidth ? pso.threadExecutionWidth : 64;
@@ -1357,13 +1351,15 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
 
 extern "C" size_t
 zfp_metal_encode2d_float_runtime(const float* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1378,22 +1374,17 @@ zfp_metal_encode2d_float_runtime(const float* src,
   unsigned int by = py / 4u;
   unsigned int blocks = bx * by;
 
-  size_t src_len = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  if (row_span > src_len)
-    src_len = row_span;
-
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                   length:src_len * sizeof(float)
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:data_span_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                   length:stream_bytes
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:stream_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1407,7 +1398,7 @@ zfp_metal_encode2d_float_runtime(const float* src,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -1415,12 +1406,14 @@ zfp_metal_encode2d_float_runtime(const float* src,
 
 extern "C" size_t
 zfp_metal_decode2d_float_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 float* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  float* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1434,21 +1427,16 @@ zfp_metal_decode2d_float_runtime(const void* stream_words,
   unsigned int blocks = bx * by;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                   length:stream_bytes
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:stream_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!src_buf)
     return 0;
 
-  size_t dst_len = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t row_span = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  if (row_span > dst_len)
-    dst_len = row_span;
-
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                   length:dst_len * sizeof(float)
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:data_span_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1462,7 +1450,7 @@ zfp_metal_decode2d_float_runtime(const void* stream_words,
   params.by = by;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_decode_pso(maxbits), src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec2d(zfp_metal_select_2d_decode_pso(maxbits), src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -1470,15 +1458,17 @@ zfp_metal_decode2d_float_runtime(const void* stream_words,
 
 extern "C" size_t
 zfp_metal_encode3d_float_runtime(const float* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1495,23 +1485,17 @@ zfp_metal_encode3d_float_runtime(const float* src,
   unsigned int bz = pz / 4u;
   unsigned int blocks = bx * by * bz;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
-  if (s2 > span) span = s2;
-  if (s3 > span) span = s3;
-
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)src
-                                                                   length:span * sizeof(float)
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:data_span_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!src_buf)
     return 0;
 
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:stream_words
-                                                                   length:stream_bytes
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:stream_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1528,7 +1512,7 @@ zfp_metal_encode3d_float_runtime(const float* src,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes))
+  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
   return stream_bytes;
@@ -1536,14 +1520,16 @@ zfp_metal_encode3d_float_runtime(const float* src,
 
 extern "C" size_t
 zfp_metal_decode3d_float_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 float* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  float* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   if (!zfp_metal_init_context())
     return 0;
@@ -1558,22 +1544,16 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
   unsigned int blocks = bx * by * bz;
 
   id<MTLBuffer> src_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:(void*)stream_words
-                                                                   length:stream_bytes
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:stream_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!src_buf)
     return 0;
 
-  size_t span = (size_t)(sx > 0 ? sx : -sx) * (size_t)nx;
-  size_t s2 = (size_t)(sy > 0 ? sy : -sy) * (size_t)ny;
-  size_t s3 = (size_t)(sz > 0 ? sz : -sz) * (size_t)nz;
-  if (s2 > span) span = s2;
-  if (s3 > span) span = s3;
-
   id<MTLBuffer> dst_buf = [zfp_metal_ctx.device newBufferWithBytesNoCopy:dst
-                                                                   length:span * sizeof(float)
-                                                                  options:MTLResourceStorageModeShared
-                                                              deallocator:nil];
+                                                                    length:data_span_bytes
+                                                                   options:MTLResourceStorageModeShared
+                                                               deallocator:nil];
   if (!dst_buf)
     return 0;
 
@@ -1590,7 +1570,7 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
   params.bz = bz;
   params.total_blocks = blocks;
 
-  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_decode_pso(maxbits), src_buf, dst_buf, &params, 0))
+  if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_decode_pso(maxbits), src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
 
   return stream_bytes;
@@ -1598,88 +1578,106 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
 
 extern "C" size_t
 zfp_metal_encode1d_double_runtime(const double* src,
-                                  unsigned int dim,
-                                  int sx,
-                                  unsigned int maxbits,
-                                  void* stream_words,
-                                  size_t stream_capacity_bytes)
+                                   unsigned int dim,
+                                   int sx,
+                                   unsigned int maxbits,
+                                   void* stream_words,
+                                   size_t stream_capacity_bytes,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   /* Metal does not support double-precision; fall through to CPU. */
   (void)src; (void)dim; (void)sx; (void)maxbits;
   (void)stream_words; (void)stream_capacity_bytes;
+  (void)data_span_bytes; (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode1d_double_runtime(const void* stream_words,
-                                  unsigned int dim,
-                                  int sx,
-                                  unsigned int maxbits,
-                                  double* dst)
+                                   unsigned int dim,
+                                   int sx,
+                                   unsigned int maxbits,
+                                   double* dst,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)stream_words; (void)dim; (void)sx; (void)maxbits; (void)dst;
+  (void)data_span_bytes; (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode2d_double_runtime(const double* src,
-                                  unsigned int nx,
-                                  unsigned int ny,
-                                  ptrdiff_t sx,
-                                  ptrdiff_t sy,
-                                  unsigned int maxbits,
-                                  void* stream_words,
-                                  size_t stream_capacity_bytes)
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   unsigned int maxbits,
+                                   void* stream_words,
+                                   size_t stream_capacity_bytes,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)src; (void)nx; (void)ny; (void)sx; (void)sy; (void)maxbits;
   (void)stream_words; (void)stream_capacity_bytes;
+  (void)data_span_bytes; (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode2d_double_runtime(const void* stream_words,
-                                  unsigned int nx,
-                                  unsigned int ny,
-                                  ptrdiff_t sx,
-                                  ptrdiff_t sy,
-                                  unsigned int maxbits,
-                                  double* dst)
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   unsigned int maxbits,
+                                   double* dst,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)stream_words; (void)nx; (void)ny; (void)sx; (void)sy;
   (void)maxbits; (void)dst;
+  (void)data_span_bytes; (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode3d_double_runtime(const double* src,
-                                  unsigned int nx,
-                                  unsigned int ny,
-                                  unsigned int nz,
-                                  ptrdiff_t sx,
-                                  ptrdiff_t sy,
-                                  ptrdiff_t sz,
-                                  unsigned int maxbits,
-                                  void* stream_words,
-                                  size_t stream_capacity_bytes)
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   unsigned int nz,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   ptrdiff_t sz,
+                                   unsigned int maxbits,
+                                   void* stream_words,
+                                   size_t stream_capacity_bytes,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)src; (void)nx; (void)ny; (void)nz; (void)sx; (void)sy; (void)sz;
   (void)maxbits; (void)stream_words; (void)stream_capacity_bytes;
+  (void)data_span_bytes; (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode3d_double_runtime(const void* stream_words,
-                                  unsigned int nx,
-                                  unsigned int ny,
-                                  unsigned int nz,
-                                  ptrdiff_t sx,
-                                  ptrdiff_t sy,
-                                  ptrdiff_t sz,
-                                  unsigned int maxbits,
-                                  double* dst)
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   unsigned int nz,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   ptrdiff_t sz,
+                                   unsigned int maxbits,
+                                   double* dst,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)stream_words; (void)nx; (void)ny; (void)nz;
   (void)sx; (void)sy; (void)sz; (void)maxbits; (void)dst;
+  (void)data_span_bytes; (void)data_offset_bytes;
   return 0;
 }
 
@@ -1989,11 +1987,13 @@ zfp_metal_decode_contiguous_runtime(const void* src,
 
 extern "C" size_t
 zfp_metal_encode1d_float_runtime(const float* src,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)dim;
@@ -2001,33 +2001,41 @@ zfp_metal_encode1d_float_runtime(const float* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode1d_float_runtime(const void* stream_words,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 float* dst)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  float* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)dim;
   (void)sx;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode2d_float_runtime(const float* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)nx;
@@ -2037,17 +2045,21 @@ zfp_metal_encode2d_float_runtime(const float* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode2d_float_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 float* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  float* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)nx;
@@ -2056,20 +2068,24 @@ zfp_metal_decode2d_float_runtime(const void* stream_words,
   (void)sy;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode3d_float_runtime(const float* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)nx;
@@ -2081,19 +2097,23 @@ zfp_metal_encode3d_float_runtime(const float* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode3d_float_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 float* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  float* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)nx;
@@ -2104,16 +2124,20 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
   (void)sz;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode1d_double_runtime(const double* src,
-                                  unsigned int dim,
-                                  int sx,
-                                  unsigned int maxbits,
-                                  void* stream_words,
-                                  size_t stream_capacity_bytes)
+                                   unsigned int dim,
+                                   int sx,
+                                   unsigned int maxbits,
+                                   void* stream_words,
+                                   size_t stream_capacity_bytes,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)src;
   (void)dim;
@@ -2121,33 +2145,41 @@ zfp_metal_encode1d_double_runtime(const double* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode1d_double_runtime(const void* stream_words,
-                                  unsigned int dim,
-                                  int sx,
-                                  unsigned int maxbits,
-                                  double* dst)
+                                   unsigned int dim,
+                                   int sx,
+                                   unsigned int maxbits,
+                                   double* dst,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)dim;
   (void)sx;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode2d_double_runtime(const double* src,
-                                  unsigned int nx,
-                                  unsigned int ny,
-                                  ptrdiff_t sx,
-                                  ptrdiff_t sy,
-                                  unsigned int maxbits,
-                                  void* stream_words,
-                                  size_t stream_capacity_bytes)
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   unsigned int maxbits,
+                                   void* stream_words,
+                                   size_t stream_capacity_bytes,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)src;
   (void)nx;
@@ -2157,17 +2189,21 @@ zfp_metal_encode2d_double_runtime(const double* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode2d_double_runtime(const void* stream_words,
-                                  unsigned int nx,
-                                  unsigned int ny,
-                                  ptrdiff_t sx,
-                                  ptrdiff_t sy,
-                                  unsigned int maxbits,
-                                  double* dst)
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   unsigned int maxbits,
+                                   double* dst,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)nx;
@@ -2176,11 +2212,157 @@ zfp_metal_decode2d_double_runtime(const void* stream_words,
   (void)sy;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode3d_double_runtime(const double* src,
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   unsigned int nz,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   ptrdiff_t sz,
+                                   unsigned int maxbits,
+                                   void* stream_words,
+                                   size_t stream_capacity_bytes,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
+{
+  (void)src;
+  (void)nx;
+  (void)ny;
+  (void)nz;
+  (void)sx;
+  (void)sy;
+  (void)sz;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode3d_double_runtime(const void* stream_words,
+                                   unsigned int nx,
+                                   unsigned int ny,
+                                   unsigned int nz,
+                                   ptrdiff_t sx,
+                                   ptrdiff_t sy,
+                                   ptrdiff_t sz,
+                                   unsigned int maxbits,
+                                   double* dst,
+                                   size_t data_span_bytes,
+                                   size_t data_offset_bytes)
+{
+  (void)stream_words;
+  (void)nx;
+  (void)ny;
+  (void)nz;
+  (void)sx;
+  (void)sy;
+  (void)sz;
+  (void)maxbits;
+  (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode1d_int32_runtime(const int* src,
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
+{
+  (void)src;
+  (void)dim;
+  (void)sx;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode1d_int32_runtime(const void* stream_words,
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  int* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
+{
+  (void)stream_words;
+  (void)dim;
+  (void)sx;
+  (void)maxbits;
+  (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode2d_int32_runtime(const int* src,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
+{
+  (void)src;
+  (void)nx;
+  (void)ny;
+  (void)sx;
+  (void)sy;
+  (void)maxbits;
+  (void)stream_words;
+  (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_decode2d_int32_runtime(const void* stream_words,
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  int* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
+{
+  (void)stream_words;
+  (void)nx;
+  (void)ny;
+  (void)sx;
+  (void)sy;
+  (void)maxbits;
+  (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
+  return 0;
+}
+
+extern "C" size_t
+zfp_metal_encode3d_int32_runtime(const int* src,
                                   unsigned int nx,
                                   unsigned int ny,
                                   unsigned int nz,
@@ -2189,7 +2371,9 @@ zfp_metal_encode3d_double_runtime(const double* src,
                                   ptrdiff_t sz,
                                   unsigned int maxbits,
                                   void* stream_words,
-                                  size_t stream_capacity_bytes)
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)nx;
@@ -2201,11 +2385,13 @@ zfp_metal_encode3d_double_runtime(const double* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
-zfp_metal_decode3d_double_runtime(const void* stream_words,
+zfp_metal_decode3d_int32_runtime(const void* stream_words,
                                   unsigned int nx,
                                   unsigned int ny,
                                   unsigned int nz,
@@ -2213,7 +2399,9 @@ zfp_metal_decode3d_double_runtime(const void* stream_words,
                                   ptrdiff_t sy,
                                   ptrdiff_t sz,
                                   unsigned int maxbits,
-                                  double* dst)
+                                  int* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)nx;
@@ -2224,136 +2412,20 @@ zfp_metal_decode3d_double_runtime(const void* stream_words,
   (void)sz;
   (void)maxbits;
   (void)dst;
-  return 0;
-}
-
-extern "C" size_t
-zfp_metal_encode1d_int32_runtime(const int* src,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
-{
-  (void)src;
-  (void)dim;
-  (void)sx;
-  (void)maxbits;
-  (void)stream_words;
-  (void)stream_capacity_bytes;
-  return 0;
-}
-
-extern "C" size_t
-zfp_metal_decode1d_int32_runtime(const void* stream_words,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 int* dst)
-{
-  (void)stream_words;
-  (void)dim;
-  (void)sx;
-  (void)maxbits;
-  (void)dst;
-  return 0;
-}
-
-extern "C" size_t
-zfp_metal_encode2d_int32_runtime(const int* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
-{
-  (void)src;
-  (void)nx;
-  (void)ny;
-  (void)sx;
-  (void)sy;
-  (void)maxbits;
-  (void)stream_words;
-  (void)stream_capacity_bytes;
-  return 0;
-}
-
-extern "C" size_t
-zfp_metal_decode2d_int32_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 int* dst)
-{
-  (void)stream_words;
-  (void)nx;
-  (void)ny;
-  (void)sx;
-  (void)sy;
-  (void)maxbits;
-  (void)dst;
-  return 0;
-}
-
-extern "C" size_t
-zfp_metal_encode3d_int32_runtime(const int* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
-{
-  (void)src;
-  (void)nx;
-  (void)ny;
-  (void)nz;
-  (void)sx;
-  (void)sy;
-  (void)sz;
-  (void)maxbits;
-  (void)stream_words;
-  (void)stream_capacity_bytes;
-  return 0;
-}
-
-extern "C" size_t
-zfp_metal_decode3d_int32_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 int* dst)
-{
-  (void)stream_words;
-  (void)nx;
-  (void)ny;
-  (void)nz;
-  (void)sx;
-  (void)sy;
-  (void)sz;
-  (void)maxbits;
-  (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode1d_int64_runtime(const long* src,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)dim;
@@ -2361,33 +2433,41 @@ zfp_metal_encode1d_int64_runtime(const long* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode1d_int64_runtime(const void* stream_words,
-                                 unsigned int dim,
-                                 int sx,
-                                 unsigned int maxbits,
-                                 long* dst)
+                                  unsigned int dim,
+                                  int sx,
+                                  unsigned int maxbits,
+                                  long* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)dim;
   (void)sx;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode2d_int64_runtime(const long* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)nx;
@@ -2397,17 +2477,21 @@ zfp_metal_encode2d_int64_runtime(const long* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode2d_int64_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 unsigned int maxbits,
-                                 long* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  unsigned int maxbits,
+                                  long* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)nx;
@@ -2416,20 +2500,24 @@ zfp_metal_decode2d_int64_runtime(const void* stream_words,
   (void)sy;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_encode3d_int64_runtime(const long* src,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 void* stream_words,
-                                 size_t stream_capacity_bytes)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  void* stream_words,
+                                  size_t stream_capacity_bytes,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)src;
   (void)nx;
@@ -2441,19 +2529,23 @@ zfp_metal_encode3d_int64_runtime(const long* src,
   (void)maxbits;
   (void)stream_words;
   (void)stream_capacity_bytes;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
 extern "C" size_t
 zfp_metal_decode3d_int64_runtime(const void* stream_words,
-                                 unsigned int nx,
-                                 unsigned int ny,
-                                 unsigned int nz,
-                                 ptrdiff_t sx,
-                                 ptrdiff_t sy,
-                                 ptrdiff_t sz,
-                                 unsigned int maxbits,
-                                 long* dst)
+                                  unsigned int nx,
+                                  unsigned int ny,
+                                  unsigned int nz,
+                                  ptrdiff_t sx,
+                                  ptrdiff_t sy,
+                                  ptrdiff_t sz,
+                                  unsigned int maxbits,
+                                  long* dst,
+                                  size_t data_span_bytes,
+                                  size_t data_offset_bytes)
 {
   (void)stream_words;
   (void)nx;
@@ -2464,6 +2556,8 @@ zfp_metal_decode3d_int64_runtime(const void* stream_words,
   (void)sz;
   (void)maxbits;
   (void)dst;
+  (void)data_span_bytes;
+  (void)data_offset_bytes;
   return 0;
 }
 
