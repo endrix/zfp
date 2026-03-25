@@ -90,6 +90,7 @@ typedef struct ZfpMetalContext {
   id<MTLComputePipelineState> decode3d_float_r16_ps;
   id<MTLComputePipelineState> encode3d_float_r32_ps;
   id<MTLComputePipelineState> decode3d_float_r32_ps;
+  id<MTLComputePipelineState> decode3d_float_tg_ps;
   id<MTLComputePipelineState> encode1d_int32_ps;
   id<MTLComputePipelineState> decode1d_int32_ps;
   id<MTLComputePipelineState> encode2d_int32_ps;
@@ -114,7 +115,7 @@ static ZfpMetalContext zfp_metal_ctx = {
   0, nil, nil,
   nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
   nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
-  nil, nil, nil, nil,
+  nil, nil, nil, nil, nil,
   nil, nil, nil, nil, nil, nil,
   nil, nil, nil, 0, 0, 0
 };
@@ -246,6 +247,14 @@ zfp_metal_init_context()
         *(rate_kernels[i].ps) = [zfp_metal_ctx.device
           newComputePipelineStateWithFunction:fn error:&err];
     }
+  }
+
+  /* Threadgroup-prefetch 3D decode PSO (Phase B optimization) */
+  {
+    id<MTLFunction> fn = [lib newFunctionWithName:@"zfp_decode3d_float_tg"];
+    if (fn)
+      zfp_metal_ctx.decode3d_float_tg_ps = [zfp_metal_ctx.device
+        newComputePipelineStateWithFunction:fn error:&err];
   }
 
   /* Int32 codec PSOs */
@@ -457,6 +466,10 @@ zfp_metal_select_3d_encode_pso(unsigned int maxbits)
 static id<MTLComputePipelineState>
 zfp_metal_select_3d_decode_pso(unsigned int maxbits)
 {
+  /* Phase B experiment: threadgroup-prefetch kernel was tested but showed
+     -24% regression on Apple Silicon unified memory. The cooperative load
+     into threadgroup SRAM adds overhead on UMA where L2 cache already
+     provides the fast path. Keep the TG kernel compiled but disabled. */
   (void)maxbits;
   return zfp_metal_ctx.decode3d_float_ps;
 }
@@ -1333,6 +1346,8 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
   [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
   [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
 
+  /* Threadgroup size: 2 SIMD groups (width * 2). Tested 1 SIMD group for 3D
+     to reduce register pressure but no measurable improvement on Apple GPU. */
   NSUInteger width = pso.threadExecutionWidth ? pso.threadExecutionWidth : 64;
   NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
   NSUInteger group_size = width * 2u;

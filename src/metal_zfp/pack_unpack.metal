@@ -961,16 +961,18 @@ static inline void zfp_decode_block_2d_float(device const ulong* stream, uint ma
     }
   }
 
-  int ib[16];
+  /* Permute + uint2int directly into out[] (reinterpreted as int[]),
+     avoiding a separate ib[16] array to reduce register pressure. */
+  thread int* ip = (thread int*)out;
   for (uint i = 0; i < 16; ++i)
-    ib[zfp_perm2[i]] = zfp_uint2int(ub[i]);
+    ip[zfp_perm2[i]] = zfp_uint2int(ub[i]);
 
-  zfp_inv_lift2_col(ib);
-  zfp_inv_lift2_row(ib);
+  zfp_inv_lift2_col(ip);
+  zfp_inv_lift2_row(ip);
 
   float inv_w = ldexp(1.0f, emax - 30);
   for (uint i = 0; i < 16; ++i)
-    out[i] = inv_w * (float)ib[i];
+    out[i] = inv_w * (float)ip[i];
 }
 
 static inline void zfp_encode_block_3d_float(thread float* fblock, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
@@ -1102,15 +1104,169 @@ static inline void zfp_decode_block_3d_float(device const ulong* stream, uint ma
     }
   }
 
-  int ib[64];
+  /* Permute + uint2int directly into out[] (reinterpreted as int[]),
+     avoiding a separate ib[64] array to reduce register pressure. */
+  thread int* ip = (thread int*)out;
   for (uint i = 0; i < 64; ++i)
-    ib[zfp_perm3[i]] = zfp_uint2int(ub[i]);
+    ip[zfp_perm3[i]] = zfp_uint2int(ub[i]);
 
-  zfp_inv_lift3(ib);
+  zfp_inv_lift3(ip);
 
   float inv_w = ldexp(1.0f, emax - 30);
   for (uint i = 0; i < 64; ++i)
-    out[i] = inv_w * (float)ib[i];
+    out[i] = inv_w * (float)ip[i];
+}
+
+/* ========================================================================== */
+/* Threadgroup-memory bitstream reader (Phase B prefetch optimization)        */
+/* ========================================================================== */
+
+struct ZfpTgBlockReader1 {
+  threadgroup const ulong* words;
+  ulong buffer;
+  uint current_bit;
+};
+
+static inline ZfpTgBlockReader1 zfp_make_tg_reader1(threadgroup const ulong* base, uint offset_bits)
+{
+  ZfpTgBlockReader1 r;
+  uint wi = offset_bits / 64u;
+  r.words = base + wi;
+  r.buffer = r.words[0];
+  r.current_bit = offset_bits % 64u;
+  r.buffer >>= r.current_bit;
+  return r;
+}
+
+static inline uint zfp_tg_reader_read_bit(thread ZfpTgBlockReader1& r)
+{
+  uint b = (uint)(r.buffer & 1ul);
+  r.current_bit += 1u;
+  r.buffer >>= 1u;
+  if (r.current_bit >= 64u) {
+    r.current_bit = 0u;
+    r.words += 1;
+    r.buffer = r.words[0];
+  }
+  return b;
+}
+
+static inline ulong zfp_tg_reader_peek_bits(thread ZfpTgBlockReader1& r, uint count)
+{
+  if (count == 0u) return 0ul;
+  uint rem = 64u - r.current_bit;
+  if (count <= rem) {
+    ulong mask = (count >= 64u) ? ~0ul : ((1ul << count) - 1ul);
+    return r.buffer & mask;
+  }
+  ulong lo = r.buffer;
+  ulong hi = r.words[1];
+  uint hi_bits = count - rem;
+  ulong hi_mask = (hi_bits >= 64u) ? ~0ul : ((1ul << hi_bits) - 1ul);
+  return lo | ((hi & hi_mask) << rem);
+}
+
+static inline void zfp_tg_reader_skip(thread ZfpTgBlockReader1& r, uint count)
+{
+  r.current_bit += count;
+  if (r.current_bit >= 64u) {
+    r.words += 1;
+    r.buffer = r.words[0];
+    r.current_bit -= 64u;
+    r.buffer >>= r.current_bit;
+  } else {
+    r.buffer >>= count;
+  }
+}
+
+static inline ulong zfp_tg_reader_read_bits(thread ZfpTgBlockReader1& r, uint nbits)
+{
+  uint rem = 64u - r.current_bit;
+  uint first = min(rem, nbits);
+  ulong mask = (first == 64u) ? ~0ul : ((1ul << first) - 1ul);
+  ulong bits = r.buffer & mask;
+  r.buffer >>= first;
+  r.current_bit += first;
+  if (nbits >= rem) {
+    r.words += 1;
+    r.buffer = r.words[0];
+    r.current_bit = 0u;
+  }
+  uint next = nbits - first;
+  mask = (next == 64u) ? ~0ul : ((next == 0u) ? 0ul : ((1ul << next) - 1ul));
+  bits |= (r.buffer & mask) << first;
+  r.buffer >>= next;
+  r.current_bit += next;
+  return bits;
+}
+
+/* Decode a 3D float block from threadgroup memory (Phase B prefetch). */
+static inline void zfp_decode_block_3d_float_tg(threadgroup const ulong* tg_base, uint offset_bits, uint maxbits, thread float* out)
+{
+  ZfpTgBlockReader1 r = zfp_make_tg_reader1(tg_base, offset_bits);
+  uint s_cont = zfp_tg_reader_read_bit(r);
+  if (!s_cont) {
+    for (uint i = 0; i < 64; ++i)
+      out[i] = 0.0f;
+    return;
+  }
+
+  uint e = (uint)zfp_tg_reader_read_bits(r, 8u);
+  int emax = (int)e - 127;
+  uint bits = maxbits - 9u;
+
+  uint ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_tg_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_tg_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_tg_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_tg_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_tg_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    for (uint i = 0; i < 64; ++i) {
+      ub[i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  /* Permute + uint2int directly into out[] (reinterpreted as int[]),
+     avoiding a separate ib[64] array to reduce register pressure. */
+  thread int* ip = (thread int*)out;
+  for (uint i = 0; i < 64; ++i)
+    ip[zfp_perm3[i]] = zfp_uint2int(ub[i]);
+
+  zfp_inv_lift3(ip);
+
+  float inv_w = ldexp(1.0f, emax - 30);
+  for (uint i = 0; i < 64; ++i)
+    out[i] = inv_w * (float)ip[i];
 }
 
 kernel void zfp_encode1d_float(
@@ -1335,6 +1491,87 @@ kernel void zfp_decode3d_float(
 
   float fblock[64];
   zfp_decode_block_3d_float(stream, p.maxbits, block_idx, fblock);
+
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x) {
+          uint idx = x + 4u * (y + 4u * z);
+          dst[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz] = fblock[idx];
+        }
+  }
+  else {
+    for (uint z = 0; z < 4u; ++z)
+      for (uint y = 0; y < 4u; ++y)
+        for (uint x = 0; x < 4u; ++x)
+          if (x0 + x < p.nx && y0 + y < p.ny && z0 + z < p.nz) {
+            uint idx = x + 4u * (y + 4u * z);
+            dst[base + (long)x * p.sx + (long)y * p.sy + (long)z * p.sz] = fblock[idx];
+          }
+  }
+}
+
+/* ========================================================================== */
+/* Phase B: Threadgroup-prefetch 3D float decode kernel                       */
+/* Each threadgroup cooperatively loads compressed data into on-chip SRAM,    */
+/* then each thread decodes its block from fast threadgroup memory.           */
+/* ========================================================================== */
+
+kernel void zfp_decode3d_float_tg(
+  device const ulong* stream [[buffer(0)]],
+  device float* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]],
+  uint lid [[thread_position_in_threadgroup]],
+  uint tg_id [[threadgroup_position_in_grid]],
+  uint tg_size [[threads_per_threadgroup]])
+{
+  /* Number of 64-bit words per block = maxbits / 64.
+     For rate-8 3D float: maxbits=512 → 8 words per block.
+     For rate-16: maxbits=1024 → 16 words per block. */
+  uint words_per_block = p.maxbits / 64u;
+
+  /* Threadgroup memory: each thread's block data, laid out contiguously.
+     Max allocation: 128 threads * 32 words * 8 bytes = 32768 bytes = 32 KB.
+     Apple Silicon threadgroup memory limit: 32 KB — fits for up to rate-32. */
+  threadgroup ulong tg_stream[4096]; /* 4096 * 8 = 32768 bytes max */
+
+  /* --- Phase 1: Cooperative coalesced load from device → threadgroup --- */
+  /* Use gid - lid to compute the first block index for this threadgroup.
+     This is correct even for the last non-uniform threadgroup, where
+     tg_id * tg_size would give the wrong answer. */
+  uint first_block = gid - lid;
+  uint active_blocks = min(tg_size, p.total_blocks > first_block ? p.total_blocks - first_block : 0u);
+  uint total_words = active_blocks * words_per_block;
+
+  /* Starting word index in the device bitstream for this threadgroup */
+  ulong tg_word_offset = (ulong)first_block * (ulong)words_per_block;
+
+  /* Each thread loads multiple words in a strided pattern for coalescing */
+  for (uint w = lid; w < total_words; w += tg_size) {
+    tg_stream[w] = stream[tg_word_offset + w];
+  }
+
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  /* --- Phase 2: Each thread decodes its block from threadgroup memory --- */
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  uint bx = block_idx % p.bx;
+  uint by = (block_idx / p.bx) % p.by;
+  uint bz = block_idx / (p.bx * p.by);
+  uint x0 = bx * 4u;
+  uint y0 = by * 4u;
+  uint z0 = bz * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz;
+
+  /* Offset within threadgroup memory for this thread's block (in bits) */
+  uint tg_bit_offset = lid * p.maxbits;
+
+  float fblock[64];
+  zfp_decode_block_3d_float_tg(tg_stream, tg_bit_offset, p.maxbits, fblock);
 
   if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
     for (uint z = 0; z < 4u; ++z)
