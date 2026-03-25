@@ -972,11 +972,24 @@ static inline void zfp_decode_block_2d_float(device const ulong* stream, uint ma
     ip[zfp_perm2[i]] = zfp_uint2int(ub[i]);
 
   zfp_inv_lift2_col(ip);
-  zfp_inv_lift2_row(ip);
 
+  /* Fused last lift pass (row) + float scale: inline the row-direction
+     inverse lifts and write float output directly, eliminating one full
+     pass over 16 elements. */
   float inv_w = ldexp(1.0f, emax - 30);
-  for (uint i = 0; i < 16; ++i)
-    out[i] = inv_w * (float)ip[i];
+  for (uint row = 0; row < 4u; ++row) {
+    uint base = row * 4u;
+    int x = ip[base]; int y = ip[base+1]; int z = ip[base+2]; int w = ip[base+3];
+    y += w >> 1; w -= y >> 1;
+    y += w; w -= y - w;
+    z += x; x -= z - x;
+    y += z; z -= y - z;
+    w += x; x -= w - x;
+    out[base]   = inv_w * (float)x;
+    out[base+1] = inv_w * (float)y;
+    out[base+2] = inv_w * (float)z;
+    out[base+3] = inv_w * (float)w;
+  }
 }
 
 static inline void zfp_encode_block_3d_float(thread float* fblock, uint maxbits, uint block_idx, device ulong* stream, bool atomic_mode)
@@ -1128,11 +1141,45 @@ static inline void zfp_decode_block_3d_float(device const ulong* stream, uint ma
   for (uint i = 0; i < 64; ++i)
     ip[zfp_perm3[i]] = zfp_uint2int(ub[i]);
 
-  zfp_inv_lift3(ip);
+  /* First two passes of inverse lift (z-direction, y-direction) */
+  for (uint y = 0; y < 4u; ++y)
+    for (uint x = 0; x < 4u; ++x) {
+      int c[4] = { ip[1u * x + 4u * y], ip[16u + 1u * x + 4u * y], ip[32u + 1u * x + 4u * y], ip[48u + 1u * x + 4u * y] };
+      zfp_inv_lift1(c);
+      ip[1u * x + 4u * y] = c[0];
+      ip[16u + 1u * x + 4u * y] = c[1];
+      ip[32u + 1u * x + 4u * y] = c[2];
+      ip[48u + 1u * x + 4u * y] = c[3];
+    }
 
+  for (uint x = 0; x < 4u; ++x)
+    for (uint z = 0; z < 4u; ++z) {
+      int c[4] = { ip[16u * z + 1u * x], ip[16u * z + 4u + 1u * x], ip[16u * z + 8u + 1u * x], ip[16u * z + 12u + 1u * x] };
+      zfp_inv_lift1(c);
+      ip[16u * z + 1u * x] = c[0];
+      ip[16u * z + 4u + 1u * x] = c[1];
+      ip[16u * z + 8u + 1u * x] = c[2];
+      ip[16u * z + 12u + 1u * x] = c[3];
+    }
+
+  /* Fused last lift pass (x-direction) + float scale: inline the x-direction
+     inverse lifts and write float output directly, eliminating one full
+     pass over 64 elements. */
   float inv_w = ldexp(1.0f, emax - 30);
-  for (uint i = 0; i < 64; ++i)
-    out[i] = inv_w * (float)ip[i];
+  for (uint z = 0; z < 4u; ++z)
+    for (uint y = 0; y < 4u; ++y) {
+      uint base = 4u * y + 16u * z;
+      int lx = ip[base]; int ly = ip[base+1]; int lz = ip[base+2]; int lw = ip[base+3];
+      ly += lw >> 1; lw -= ly >> 1;
+      ly += lw; lw -= ly - lw;
+      lz += lx; lx -= lz - lx;
+      ly += lz; lz -= ly - lz;
+      lw += lx; lx -= lw - lx;
+      out[base]   = inv_w * (float)lx;
+      out[base+1] = inv_w * (float)ly;
+      out[base+2] = inv_w * (float)lz;
+      out[base+3] = inv_w * (float)lw;
+    }
 }
 
 /* ========================================================================== */
@@ -1280,11 +1327,43 @@ static inline void zfp_decode_block_3d_float_tg(threadgroup const ulong* tg_base
   for (uint i = 0; i < 64; ++i)
     ip[zfp_perm3[i]] = zfp_uint2int(ub[i]);
 
-  zfp_inv_lift3(ip);
+  /* First two passes of inverse lift (z-direction, y-direction) */
+  for (uint y = 0; y < 4u; ++y)
+    for (uint x = 0; x < 4u; ++x) {
+      int c[4] = { ip[1u * x + 4u * y], ip[16u + 1u * x + 4u * y], ip[32u + 1u * x + 4u * y], ip[48u + 1u * x + 4u * y] };
+      zfp_inv_lift1(c);
+      ip[1u * x + 4u * y] = c[0];
+      ip[16u + 1u * x + 4u * y] = c[1];
+      ip[32u + 1u * x + 4u * y] = c[2];
+      ip[48u + 1u * x + 4u * y] = c[3];
+    }
 
+  for (uint x = 0; x < 4u; ++x)
+    for (uint z = 0; z < 4u; ++z) {
+      int c[4] = { ip[16u * z + 1u * x], ip[16u * z + 4u + 1u * x], ip[16u * z + 8u + 1u * x], ip[16u * z + 12u + 1u * x] };
+      zfp_inv_lift1(c);
+      ip[16u * z + 1u * x] = c[0];
+      ip[16u * z + 4u + 1u * x] = c[1];
+      ip[16u * z + 8u + 1u * x] = c[2];
+      ip[16u * z + 12u + 1u * x] = c[3];
+    }
+
+  /* Fused last lift pass (x-direction) + float scale */
   float inv_w = ldexp(1.0f, emax - 30);
-  for (uint i = 0; i < 64; ++i)
-    out[i] = inv_w * (float)ip[i];
+  for (uint z = 0; z < 4u; ++z)
+    for (uint y = 0; y < 4u; ++y) {
+      uint base = 4u * y + 16u * z;
+      int lx = ip[base]; int ly = ip[base+1]; int lz = ip[base+2]; int lw = ip[base+3];
+      ly += lw >> 1; lw -= ly >> 1;
+      ly += lw; lw -= ly - lw;
+      lz += lx; lx -= lz - lx;
+      ly += lz; lz -= ly - lz;
+      lw += lx; lx -= lw - lx;
+      out[base]   = inv_w * (float)lx;
+      out[base+1] = inv_w * (float)ly;
+      out[base+2] = inv_w * (float)lz;
+      out[base+3] = inv_w * (float)lw;
+    }
 }
 
 kernel void zfp_encode1d_float(
@@ -1813,13 +1892,43 @@ kernel void zfp_diag_transform_only_3d(
   for (uint i = 0; i < 64; ++i)
     ip[zfp_perm3[i]] = zfp_uint2int(ub[i]);
 
-  /* Inverse lifting transform */
-  zfp_inv_lift3(ip);
+  /* First two passes of inverse lift (z-direction, y-direction) */
+  for (uint y = 0; y < 4u; ++y)
+    for (uint x = 0; x < 4u; ++x) {
+      int c[4] = { ip[1u * x + 4u * y], ip[16u + 1u * x + 4u * y], ip[32u + 1u * x + 4u * y], ip[48u + 1u * x + 4u * y] };
+      zfp_inv_lift1(c);
+      ip[1u * x + 4u * y] = c[0];
+      ip[16u + 1u * x + 4u * y] = c[1];
+      ip[32u + 1u * x + 4u * y] = c[2];
+      ip[48u + 1u * x + 4u * y] = c[3];
+    }
 
-  /* Dequantize: use emax=0 for diagnostic (just tests the multiply path) */
+  for (uint x = 0; x < 4u; ++x)
+    for (uint z = 0; z < 4u; ++z) {
+      int c[4] = { ip[16u * z + 1u * x], ip[16u * z + 4u + 1u * x], ip[16u * z + 8u + 1u * x], ip[16u * z + 12u + 1u * x] };
+      zfp_inv_lift1(c);
+      ip[16u * z + 1u * x] = c[0];
+      ip[16u * z + 4u + 1u * x] = c[1];
+      ip[16u * z + 8u + 1u * x] = c[2];
+      ip[16u * z + 12u + 1u * x] = c[3];
+    }
+
+  /* Fused last lift pass (x-direction) + float scale (diagnostic: emax=0) */
   float inv_w = ldexp(1.0f, -30);
-  for (uint i = 0; i < 64; ++i)
-    out[i] = inv_w * (float)ip[i];
+  for (uint z = 0; z < 4u; ++z)
+    for (uint y = 0; y < 4u; ++y) {
+      uint boff = 4u * y + 16u * z;
+      int lx = ip[boff]; int ly = ip[boff+1]; int lz = ip[boff+2]; int lw = ip[boff+3];
+      ly += lw >> 1; lw -= ly >> 1;
+      ly += lw; lw -= ly - lw;
+      lz += lx; lx -= lz - lx;
+      ly += lz; lz -= ly - lz;
+      lw += lx; lx -= lw - lx;
+      out[boff]   = inv_w * (float)lx;
+      out[boff+1] = inv_w * (float)ly;
+      out[boff+2] = inv_w * (float)lz;
+      out[boff+3] = inv_w * (float)lw;
+    }
 
   /* Write output */
   for (uint i = 0; i < 64; ++i)
