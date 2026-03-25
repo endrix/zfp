@@ -361,10 +361,8 @@ zfp_metal_init_context()
     }
   }
 
-  if (!zfp_metal_ensure_buffer(zfp_metal_ctx.device, &zfp_metal_ctx.params_buf, &zfp_metal_ctx.params_cap, sizeof(ZfpMetalLayoutParams))) {
-    zfp_metal_log_error_once("params buffer allocation", nil);
-    return 0;
-  }
+  /* params_buf no longer needed — codec launchers use setBytes for inline
+     params (all param structs are <4KB, well within Metal's inline limit). */
 
   return zfp_metal_ctx.pack_ps && zfp_metal_ctx.unpack_ps &&
          zfp_metal_ctx.encode1_ps && zfp_metal_ctx.decode1_ps &&
@@ -430,11 +428,6 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
   if (!pso)
     return 0;
 
-  if (!zfp_metal_ensure_buffer(zfp_metal_ctx.device, &zfp_metal_ctx.params_buf,
-                               &zfp_metal_ctx.params_cap, sizeof(ZfpMetalCodec1dParams)))
-    return 0;
-  memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec1dParams));
-
   id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
 
   if (fill_dst_bytes > 0) {
@@ -447,7 +440,7 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
   [enc setComputePipelineState:pso];
   [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
   [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
-  [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+  [enc setBytes:params length:sizeof(ZfpMetalCodec1dParams) atIndex:2];
 
   NSUInteger width = pso.threadExecutionWidth ? pso.threadExecutionWidth : 64;
   NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
@@ -1347,11 +1340,6 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
   if (!pso)
     return 0;
 
-  if (!zfp_metal_ensure_buffer(zfp_metal_ctx.device, &zfp_metal_ctx.params_buf,
-                               &zfp_metal_ctx.params_cap, sizeof(ZfpMetalCodec2dParams)))
-    return 0;
-  memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec2dParams));
-
   id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
 
   if (fill_dst_bytes > 0) {
@@ -1364,7 +1352,7 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
   [enc setComputePipelineState:pso];
   [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
   [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
-  [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+  [enc setBytes:params length:sizeof(ZfpMetalCodec2dParams) atIndex:2];
 
   NSUInteger width = pso.threadExecutionWidth ? pso.threadExecutionWidth : 64;
   NSUInteger tg = pso.maxTotalThreadsPerThreadgroup;
@@ -1399,11 +1387,6 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
   if (!pso)
     return 0;
 
-  if (!zfp_metal_ensure_buffer(zfp_metal_ctx.device, &zfp_metal_ctx.params_buf,
-                               &zfp_metal_ctx.params_cap, sizeof(ZfpMetalCodec3dParams)))
-    return 0;
-  memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec3dParams));
-
   id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
 
   if (fill_dst_bytes > 0) {
@@ -1417,7 +1400,7 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
   zfp_metal_report_pso_info(pso, "codec3d");
   [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
   [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
-  [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+  [enc setBytes:params length:sizeof(ZfpMetalCodec3dParams) atIndex:2];
 
   /* Threadgroup size: 2 SIMD groups (width * 2). Tested 1 SIMD group for 3D
      to reduce register pressure but no measurable improvement on Apple GPU. */
@@ -1487,8 +1470,7 @@ zfp_metal_run_diagnostic_3d(id<MTLBuffer> stream_buf,
   fprintf(stderr, "[Metal Diag] Running diagnostic kernels (3D, %u blocks, %.1f MB)\n",
           total, (double)data_bytes / (1024.0*1024.0));
 
-  /* Copy params */
-  memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec3dParams));
+  /* params passed inline via setBytes */
 
   int num_tests = sizeof(tests) / sizeof(tests[0]);
   for (int t = 0; t < num_tests; ++t) {
@@ -1503,7 +1485,7 @@ zfp_metal_run_diagnostic_3d(id<MTLBuffer> stream_buf,
       [enc setComputePipelineState:tests[t].pso];
       [enc setBuffer:tests[t].src offset:0 atIndex:0];
       [enc setBuffer:tests[t].dst offset:0 atIndex:1];
-      [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+      [enc setBytes:params length:sizeof(ZfpMetalCodec3dParams) atIndex:2];
       NSUInteger width = tests[t].pso.threadExecutionWidth ?: 64;
       NSUInteger gs = width * 2u;
       NSUInteger maxt = tests[t].pso.maxTotalThreadsPerThreadgroup;
@@ -1524,7 +1506,7 @@ zfp_metal_run_diagnostic_3d(id<MTLBuffer> stream_buf,
       [enc setComputePipelineState:tests[t].pso];
       [enc setBuffer:tests[t].src offset:0 atIndex:0];
       [enc setBuffer:tests[t].dst offset:0 atIndex:1];
-      [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+      [enc setBytes:params length:sizeof(ZfpMetalCodec3dParams) atIndex:2];
       NSUInteger width = tests[t].pso.threadExecutionWidth ?: 64;
       NSUInteger gs = width * 2u;
       NSUInteger maxt = tests[t].pso.maxTotalThreadsPerThreadgroup;
@@ -1973,17 +1955,13 @@ zfp_metal_launch_layout(id<MTLComputePipelineState> pso,
     src_buf = zfp_metal_ctx.src_buf;
     dst_buf = zfp_metal_ctx.dst_buf;
   }
-  if (!zfp_metal_ctx.params_buf)
-    return 0;
-
-  memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalLayoutParams));
 
   cb = [zfp_metal_ctx.queue commandBuffer];
   enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
   [enc setBuffer:src_buf offset:0 atIndex:0];
   [enc setBuffer:dst_buf offset:0 atIndex:1];
-  [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+  [enc setBytes:params length:sizeof(ZfpMetalLayoutParams) atIndex:2];
 
   width = pso.threadExecutionWidth;
   if (!width)
