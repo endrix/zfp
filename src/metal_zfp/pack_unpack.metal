@@ -868,9 +868,11 @@ static inline void zfp_encode_block_2d_float(thread float* fblock, uint maxbits,
   uint kmin = 32u > (uint)maxprec ? 32u - (uint)maxprec : 0u;
   uint n = 0u;
   for (uint k = 32u; bits && k-- > kmin;) {
-    ulong x = 0ul;
+    /* 2D block: only 16 bits needed; gather into uint to avoid 64-bit shifts */
+    uint x_lo = 0u;
     for (uint i = 0; i < 16; ++i)
-      x += (ulong)((ub[i] >> k) & 1u) << i;
+      x_lo += ((ub[i] >> k) & 1u) << i;
+    ulong x = (ulong)x_lo;
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
@@ -955,9 +957,11 @@ static inline void zfp_decode_block_2d_float(device const ulong* stream, uint ma
         break;
       }
     }
+    /* 2D block: only low 16 bits set; use uint scatter to avoid 64-bit shifts */
+    uint x_lo = (uint)(x & 0xFFFFul);
     for (uint i = 0; i < 16; ++i) {
-      ub[i] += (uint)(x & 1ul) << k;
-      x >>= 1u;
+      ub[i] += (x_lo & 1u) << k;
+      x_lo >>= 1u;
     }
   }
 
@@ -1005,9 +1009,15 @@ static inline void zfp_encode_block_3d_float(thread float* fblock, uint maxbits,
   uint kmin = 32u > (uint)maxprec ? 32u - (uint)maxprec : 0u;
   uint n = 0u;
   for (uint k = 32u; bits && k-- > kmin;) {
-    ulong x = 0ul;
-    for (uint i = 0; i < 64; ++i)
-      x += (ulong)((ub[i] >> k) & 1u) << i;
+    /* Split-32 gather: build x from two 32-bit halves to avoid costly
+       64-bit shift emulation on Apple Silicon's 32-bit ALUs */
+    uint x_lo = 0u;
+    uint x_hi = 0u;
+    for (uint i = 0; i < 32; ++i)
+      x_lo += ((ub[i] >> k) & 1u) << i;
+    for (uint i = 32; i < 64; ++i)
+      x_hi += ((ub[i] >> k) & 1u) << (i - 32u);
+    ulong x = (ulong)x_lo | ((ulong)x_hi << 32u);
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
@@ -1098,9 +1108,17 @@ static inline void zfp_decode_block_3d_float(device const ulong* stream, uint ma
         break;
       }
     }
-    for (uint i = 0; i < 64; ++i) {
-      ub[i] += (uint)(x & 1ul) << k;
-      x >>= 1u;
+    /* Split-32 scatter: use 32-bit ops to avoid costly 64-bit shift
+       emulation on Apple Silicon's 32-bit ALUs */
+    uint x_lo = (uint)(x & 0xFFFFFFFFul);
+    uint x_hi = (uint)(x >> 32u);
+    for (uint i = 0; i < 32; ++i) {
+      ub[i] += (x_lo & 1u) << k;
+      x_lo >>= 1u;
+    }
+    for (uint i = 32; i < 64; ++i) {
+      ub[i] += (x_hi & 1u) << k;
+      x_hi >>= 1u;
     }
   }
 
@@ -1512,6 +1530,601 @@ kernel void zfp_decode3d_float(
 }
 
 /* ========================================================================== */
+/* Threadgroup-memory ub[] decode: reduces register pressure by keeping the   */
+/* 64-element accumulation buffer in threadgroup SRAM instead of registers.   */
+/* Each thread still processes one block, but ub[64] lives in TG memory.     */
+/* ========================================================================== */
+
+/* Inverse 1D lifting transform operating on threadgroup memory */
+static inline void zfp_inv_lift1_tg(threadgroup int* p)
+{
+  int x = p[0];
+  int y = p[1];
+  int z = p[2];
+  int w = p[3];
+  y += w >> 1; w -= y >> 1;
+  y += w; w -= y - w;
+  z += x; x -= z - x;
+  y += z; z -= y - z;
+  w += x; x -= w - x;
+  p[0] = x;
+  p[1] = y;
+  p[2] = z;
+  p[3] = w;
+}
+
+/* 3D inverse lifting transform operating on threadgroup memory */
+static inline void zfp_inv_lift3_tg(threadgroup int* p)
+{
+  for (uint y = 0; y < 4u; ++y)
+    for (uint x = 0; x < 4u; ++x) {
+      int c[4] = { p[1u * x + 4u * y], p[16u + 1u * x + 4u * y], p[32u + 1u * x + 4u * y], p[48u + 1u * x + 4u * y] };
+      zfp_inv_lift1(c);
+      p[1u * x + 4u * y] = c[0];
+      p[16u + 1u * x + 4u * y] = c[1];
+      p[32u + 1u * x + 4u * y] = c[2];
+      p[48u + 1u * x + 4u * y] = c[3];
+    }
+
+  for (uint x = 0; x < 4u; ++x)
+    for (uint z = 0; z < 4u; ++z) {
+      int c[4] = { p[16u * z + 1u * x], p[16u * z + 4u + 1u * x], p[16u * z + 8u + 1u * x], p[16u * z + 12u + 1u * x] };
+      zfp_inv_lift1(c);
+      p[16u * z + 1u * x] = c[0];
+      p[16u * z + 4u + 1u * x] = c[1];
+      p[16u * z + 8u + 1u * x] = c[2];
+      p[16u * z + 12u + 1u * x] = c[3];
+    }
+
+  for (uint z = 0; z < 4u; ++z)
+    for (uint y = 0; y < 4u; ++y)
+      zfp_inv_lift1_tg(p + 4u * y + 16u * z);
+}
+
+/* Decode one 3D float block with ub[] in threadgroup memory.
+   Takes a pointer to a 64-element threadgroup int/uint region.
+   Writes decoded float values into the same region (reinterpreted). */
+static inline void zfp_decode_block_3d_float_tgub(
+  device const ulong* stream, uint maxbits, uint block_idx,
+  threadgroup uint* tg_ub)
+{
+  ZfpBlockReader1 r = zfp_make_reader1(stream, maxbits, block_idx);
+  uint s_cont = zfp_reader_read_bit(r);
+  if (!s_cont) {
+    for (uint i = 0; i < 64; ++i)
+      ((threadgroup float*)tg_ub)[i] = 0.0f;
+    return;
+  }
+
+  uint e = (uint)zfp_reader_read_bits(r, 8u);
+  int emax = (int)e - 127;
+  uint bits = maxbits - 9u;
+
+  /* Zero-init ub in threadgroup memory */
+  for (uint i = 0; i < 64; ++i)
+    tg_ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    /* Scatter bitplane to threadgroup memory */
+    for (uint i = 0; i < 64; ++i) {
+      tg_ub[i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  /* Permute + uint2int into the same TG region (reinterpreted as int) */
+  threadgroup int* ip = (threadgroup int*)tg_ub;
+  /* Need a temp copy since permute is not in-place */
+  uint ub_copy[64];
+  for (uint i = 0; i < 64; ++i)
+    ub_copy[i] = tg_ub[i];
+  for (uint i = 0; i < 64; ++i)
+    ip[zfp_perm3[i]] = zfp_uint2int(ub_copy[i]);
+
+  /* Inverse lifting transform in threadgroup memory */
+  zfp_inv_lift3_tg(ip);
+
+  /* Dequantize: write float results into same TG region */
+  threadgroup float* fp = (threadgroup float*)tg_ub;
+  float inv_w = ldexp(1.0f, emax - 30);
+  for (uint i = 0; i < 64; ++i)
+    fp[i] = inv_w * (float)ip[i];
+}
+
+/* 3D float decode kernel using threadgroup memory for ub[].
+   Each thread in the threadgroup processes one independent ZFP block,
+   but its ub[64] array lives in threadgroup SRAM to free register space.
+   Threadgroup size should match the number of blocks per TG (e.g., 32). */
+#define TGUB_BLOCKS_PER_TG 32u
+kernel void zfp_decode3d_float_tgub(
+  device const ulong* stream [[buffer(0)]],
+  device float* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]],
+  uint lid [[thread_index_in_threadgroup]],
+  threadgroup uint* tg_mem [[threadgroup(0)]])
+{
+  uint block_idx = gid;
+  if (block_idx >= p.total_blocks)
+    return;
+
+  /* Each thread gets its own 64-uint region in threadgroup memory */
+  threadgroup uint* my_ub = tg_mem + lid * 64u;
+
+  /* Decode the block */
+  zfp_decode_block_3d_float_tgub(stream, p.maxbits, block_idx, my_ub);
+
+  /* Write output to device memory */
+  threadgroup float* my_fp = (threadgroup float*)my_ub;
+
+  uint bx_idx = block_idx % p.bx;
+  uint by_idx = (block_idx / p.bx) % p.by;
+  uint bz_idx = block_idx / (p.bx * p.by);
+  uint x0 = bx_idx * 4u;
+  uint y0 = by_idx * 4u;
+  uint z0 = bz_idx * 4u;
+  long base = (long)x0 * p.sx + (long)y0 * p.sy + (long)z0 * p.sz;
+
+  if (x0 + 4u <= p.nx && y0 + 4u <= p.ny && z0 + 4u <= p.nz) {
+    for (uint zz = 0; zz < 4u; ++zz)
+      for (uint yy = 0; yy < 4u; ++yy)
+        for (uint xx = 0; xx < 4u; ++xx) {
+          uint idx = xx + 4u * (yy + 4u * zz);
+          dst[base + (long)xx * p.sx + (long)yy * p.sy + (long)zz * p.sz] = my_fp[idx];
+        }
+  }
+  else {
+    for (uint zz = 0; zz < 4u; ++zz)
+      for (uint yy = 0; yy < 4u; ++yy)
+        for (uint xx = 0; xx < 4u; ++xx)
+          if (x0 + xx < p.nx && y0 + yy < p.ny && z0 + zz < p.nz) {
+            uint idx = xx + 4u * (yy + 4u * zz);
+            dst[base + (long)xx * p.sx + (long)yy * p.sy + (long)zz * p.sz] = my_fp[idx];
+          }
+  }
+}
+
+/* ========================================================================== */
+/* Diagnostic kernels: isolate bitplane decode vs transform cost              */
+/* Enabled only with ZFP_METAL_CODEC_EXPERIMENTAL.                           */
+/* ========================================================================== */
+
+/* Diagnostic 1: Bitplane decode only.
+   Reads compressed stream, decodes bitplanes into ub[64] (uint), writes raw
+   uint output. Skips permute, uint2int, lifting, dequant. Measures the serial
+   bitplane decode cost in isolation. */
+kernel void zfp_diag_bitplane_only_3d(
+  device const ulong* stream [[buffer(0)]],
+  device uint* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  ZfpBlockReader1 r = zfp_make_reader1(stream, p.maxbits, gid);
+  uint s_cont = zfp_reader_read_bit(r);
+  if (!s_cont) {
+    for (uint i = 0; i < 64; ++i)
+      dst[(ulong)gid * 64ul + i] = 0u;
+    return;
+  }
+
+  uint e = (uint)zfp_reader_read_bits(r, 8u);
+  (void)e; /* not needed for bitplane-only */
+  uint bits = p.maxbits - 9u;
+
+  uint ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    for (uint i = 0; i < 64; ++i) {
+      ub[i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  /* Write raw uint values (no permute, no lift, no dequant) */
+  for (uint i = 0; i < 64; ++i)
+    dst[(ulong)gid * 64ul + i] = ub[i];
+}
+
+/* Diagnostic 2: Transform only (permute + uint2int + inverse lift + dequant).
+   Reads 64 uint values per block from input, applies the ZFP inverse transform
+   pipeline, writes float output. Measures the cost of the post-decode math. */
+kernel void zfp_diag_transform_only_3d(
+  device const uint* src [[buffer(0)]],
+  device float* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  ulong base = (ulong)gid * 64ul;
+  uint ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = src[base + i];
+
+  /* Permute + uint2int into float array (reinterpreted as int) */
+  float out[64];
+  thread int* ip = (thread int*)out;
+  for (uint i = 0; i < 64; ++i)
+    ip[zfp_perm3[i]] = zfp_uint2int(ub[i]);
+
+  /* Inverse lifting transform */
+  zfp_inv_lift3(ip);
+
+  /* Dequantize: use emax=0 for diagnostic (just tests the multiply path) */
+  float inv_w = ldexp(1.0f, -30);
+  for (uint i = 0; i < 64; ++i)
+    out[i] = inv_w * (float)ip[i];
+
+  /* Write output */
+  for (uint i = 0; i < 64; ++i)
+    dst[base + i] = out[i];
+}
+
+/* Diagnostic 3: Memory-only (read + write, no compute).
+   Measures raw memory throughput as a baseline reference. */
+kernel void zfp_diag_memcopy_3d(
+  device const uint* src [[buffer(0)]],
+  device float* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  ulong base = (ulong)gid * 64ul;
+  for (uint i = 0; i < 64; ++i)
+    dst[base + i] = as_type<float>(src[base + i]);
+}
+
+/* Diagnostic 4: Bitplane decode using device memory for ub[].
+   Same bitstream reading as bitplane_only_3d, but accumulates ub[] into the
+   device-memory output buffer directly (instead of thread-private registers).
+   Tests whether register pressure from ub[64] is the occupancy bottleneck. */
+kernel void zfp_diag_bitplane_devub_3d(
+  device const ulong* stream [[buffer(0)]],
+  device uint* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  ulong base = (ulong)gid * 64ul;
+
+  /* Zero-init output in device memory (used as ub accumulator) */
+  for (uint i = 0; i < 64; ++i)
+    dst[base + i] = 0u;
+
+  ZfpBlockReader1 r = zfp_make_reader1(stream, p.maxbits, gid);
+  uint s_cont = zfp_reader_read_bit(r);
+  if (!s_cont)
+    return;
+
+  uint e = (uint)zfp_reader_read_bits(r, 8u);
+  (void)e;
+  uint bits = p.maxbits - 9u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    /* Scatter bitplane to device memory instead of registers */
+    for (uint i = 0; i < 64; ++i) {
+      dst[base + i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+}
+
+/* Diagnostic 5: Bitstream reading only (no ub[] accumulation).
+   Reads the exact same bitstream as bitplane_only_3d but discards results.
+   Writes a single checksum value per block. Measures pure serial bit-reading
+   cost without register pressure from ub[64]. */
+kernel void zfp_diag_bitread_only_3d(
+  device const ulong* stream [[buffer(0)]],
+  device uint* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  ZfpBlockReader1 r = zfp_make_reader1(stream, p.maxbits, gid);
+  uint s_cont = zfp_reader_read_bit(r);
+  if (!s_cont) {
+    dst[gid] = 0u;
+    return;
+  }
+
+  uint e = (uint)zfp_reader_read_bits(r, 8u);
+  uint bits = p.maxbits - 9u;
+  uint checksum = e;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    checksum ^= (uint)(x & 0xFFFFFFFFul);
+  }
+
+  /* Write single checksum (minimal output, minimal register pressure) */
+  dst[gid] = checksum;
+}
+
+/* Diagnostic 6: Bitplane decode with ub[] in threadgroup memory.
+   Same bitstream reading and scatter as bitplane_only_3d, but ub[64]
+   lives in threadgroup SRAM instead of registers.
+   Tests whether reduced register pressure improves occupancy & throughput. */
+kernel void zfp_diag_bitplane_tgub_3d(
+  device const ulong* stream [[buffer(0)]],
+  device uint* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]],
+  uint lid [[thread_index_in_threadgroup]],
+  threadgroup uint* tg_mem [[threadgroup(0)]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  /* Each thread gets its own 64-uint region in TG memory */
+  threadgroup uint* ub = tg_mem + lid * 64u;
+
+  ZfpBlockReader1 r = zfp_make_reader1(stream, p.maxbits, gid);
+  uint s_cont = zfp_reader_read_bit(r);
+  if (!s_cont) {
+    for (uint i = 0; i < 64; ++i)
+      dst[(ulong)gid * 64ul + i] = 0u;
+    return;
+  }
+
+  uint e = (uint)zfp_reader_read_bits(r, 8u);
+  (void)e;
+  uint bits = p.maxbits - 9u;
+
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    /* Scatter bitplane to threadgroup memory */
+    for (uint i = 0; i < 64; ++i) {
+      ub[i] += (uint)(x & 1ul) << k;
+      x >>= 1u;
+    }
+  }
+
+  /* Write from TG memory to device output */
+  for (uint i = 0; i < 64; ++i)
+    dst[(ulong)gid * 64ul + i] = ub[i];
+}
+
+/* Diagnostic 7: Bitplane decode with split-32 scatter.
+   Splits the 64-bit bitplane word x into two 32-bit halves and processes
+   them with 32-bit arithmetic only. Tests whether 64-bit shift emulation
+   is a significant cost on Apple Silicon's 32-bit ALUs. */
+kernel void zfp_diag_bitplane_split32_3d(
+  device const ulong* stream [[buffer(0)]],
+  device uint* dst [[buffer(1)]],
+  constant Codec3dParams& p [[buffer(2)]],
+  uint gid [[thread_position_in_grid]])
+{
+  if (gid >= p.total_blocks)
+    return;
+
+  ZfpBlockReader1 r = zfp_make_reader1(stream, p.maxbits, gid);
+  uint s_cont = zfp_reader_read_bit(r);
+  if (!s_cont) {
+    for (uint i = 0; i < 64; ++i)
+      dst[(ulong)gid * 64ul + i] = 0u;
+    return;
+  }
+
+  uint e = (uint)zfp_reader_read_bits(r, 8u);
+  (void)e;
+  uint bits = p.maxbits - 9u;
+
+  uint ub[64];
+  for (uint i = 0; i < 64; ++i)
+    ub[i] = 0u;
+
+  uint n = 0u;
+  uint m = 0u;
+  for (uint k = 32u; bits && (m = 0u, k-- > 0u);) {
+    m = min(n, bits);
+    bits -= m;
+    ulong x = zfp_reader_read_bits(r, m);
+    for (; bits && n < 64u; n++, m = n) {
+      bits--;
+      if (zfp_reader_read_bit(r)) {
+        uint inner_max = min(63u - n, bits);
+        if (inner_max > 0u) {
+          ulong peek = zfp_reader_peek_bits(r, inner_max);
+          uint z = peek ? (uint)ctz(peek) : inner_max;
+          uint run = min(z, inner_max);
+          if (run > 0u) {
+            zfp_reader_skip(r, run);
+            bits -= run;
+            n += run;
+          }
+          if (z < inner_max) {
+            zfp_reader_skip(r, 1u);
+            bits--;
+          }
+        }
+        x += 1ul << n;
+      }
+      else {
+        m = 64u;
+        break;
+      }
+    }
+    /* Split-32 scatter: process lo and hi halves with 32-bit ops only */
+    uint x_lo = (uint)(x & 0xFFFFFFFFul);
+    uint x_hi = (uint)(x >> 32u);
+    for (uint i = 0; i < 32; ++i) {
+      ub[i] += (x_lo & 1u) << k;
+      x_lo >>= 1u;
+    }
+    for (uint i = 32; i < 64; ++i) {
+      ub[i] += (x_hi & 1u) << k;
+      x_hi >>= 1u;
+    }
+  }
+
+  for (uint i = 0; i < 64; ++i)
+    dst[(ulong)gid * 64ul + i] = ub[i];
+}
+
+/* ========================================================================== */
 /* Phase B: Threadgroup-prefetch 3D float decode kernel                       */
 /* Each threadgroup cooperatively loads compressed data into on-chip SRAM,    */
 /* then each thread decodes its block from fast threadgroup memory.           */
@@ -1719,9 +2332,11 @@ static inline void zfp_encode_block_2d_int32(thread int* ib, uint maxbits, uint 
   uint bits = maxbits;
   uint n = 0u;
   for (uint k = 32u; bits && k-- > 0u;) {
-    ulong x = 0ul;
+    /* 2D block: only 16 bits needed; gather into uint to avoid 64-bit shifts */
+    uint x_lo = 0u;
     for (uint i = 0; i < 16; ++i)
-      x += (ulong)((ub[i] >> k) & 1u) << i;
+      x_lo += ((ub[i] >> k) & 1u) << i;
+    ulong x = (ulong)x_lo;
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
@@ -1798,9 +2413,11 @@ static inline void zfp_decode_block_2d_int32(device const ulong* stream, uint ma
         break;
       }
     }
+    /* 2D block: only low 16 bits set; use uint scatter to avoid 64-bit shifts */
+    uint x_lo = (uint)(x & 0xFFFFul);
     for (uint i = 0; i < 16; ++i) {
-      ub[i] += (uint)(x & 1ul) << k;
-      x >>= 1u;
+      ub[i] += (x_lo & 1u) << k;
+      x_lo >>= 1u;
     }
   }
 
@@ -1824,9 +2441,15 @@ static inline void zfp_encode_block_3d_int32(thread int* ib, uint maxbits, uint 
   uint bits = maxbits;
   uint n = 0u;
   for (uint k = 32u; bits && k-- > 0u;) {
-    ulong x = 0ul;
-    for (uint i = 0; i < 64; ++i)
-      x += (ulong)((ub[i] >> k) & 1u) << i;
+    /* Split-32 gather: build x from two 32-bit halves to avoid costly
+       64-bit shift emulation on Apple Silicon's 32-bit ALUs */
+    uint x_lo = 0u;
+    uint x_hi = 0u;
+    for (uint i = 0; i < 32; ++i)
+      x_lo += ((ub[i] >> k) & 1u) << i;
+    for (uint i = 32; i < 64; ++i)
+      x_hi += ((ub[i] >> k) & 1u) << (i - 32u);
+    ulong x = (ulong)x_lo | ((ulong)x_hi << 32u);
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
@@ -1903,9 +2526,17 @@ static inline void zfp_decode_block_3d_int32(device const ulong* stream, uint ma
         break;
       }
     }
-    for (uint i = 0; i < 64; ++i) {
-      ub[i] += (uint)(x & 1ul) << k;
-      x >>= 1u;
+    /* Split-32 scatter: use 32-bit ops to avoid costly 64-bit shift
+       emulation on Apple Silicon's 32-bit ALUs */
+    uint x_lo = (uint)(x & 0xFFFFFFFFul);
+    uint x_hi = (uint)(x >> 32u);
+    for (uint i = 0; i < 32; ++i) {
+      ub[i] += (x_lo & 1u) << k;
+      x_lo >>= 1u;
+    }
+    for (uint i = 32; i < 64; ++i) {
+      ub[i] += (x_hi & 1u) << k;
+      x_hi >>= 1u;
     }
   }
 
@@ -2280,9 +2911,11 @@ static inline void zfp_encode_block_2d_int64(thread long* ib, uint maxbits, uint
   uint bits = maxbits;
   uint n = 0u;
   for (uint k = 64u; bits && k-- > 0u;) {
-    ulong x = 0ul;
+    /* 2D block: only 16 bits needed; gather into uint to avoid 64-bit shifts */
+    uint x_lo = 0u;
     for (uint i = 0; i < 16; ++i)
-      x += (ulong)((ub[i] >> k) & 1ul) << i;
+      x_lo += (uint)((ub[i] >> k) & 1ul) << i;
+    ulong x = (ulong)x_lo;
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
@@ -2359,9 +2992,12 @@ static inline void zfp_decode_block_2d_int64(device const ulong* stream, uint ma
         break;
       }
     }
+    /* 2D block: only low 16 bits set; use uint scatter to avoid 64-bit shifts.
+       ub[] is ulong so accumulate with (ulong) cast for k > 31 */
+    uint x_lo = (uint)(x & 0xFFFFul);
     for (uint i = 0; i < 16; ++i) {
-      ub[i] += (ulong)(x & 1ul) << k;
-      x >>= 1u;
+      ub[i] += (ulong)(x_lo & 1u) << k;
+      x_lo >>= 1u;
     }
   }
 
@@ -2385,9 +3021,17 @@ static inline void zfp_encode_block_3d_int64(thread long* ib, uint maxbits, uint
   uint bits = maxbits;
   uint n = 0u;
   for (uint k = 64u; bits && k-- > 0u;) {
-    ulong x = 0ul;
-    for (uint i = 0; i < 64; ++i)
-      x += (ulong)((ub[i] >> k) & 1ul) << i;
+    /* Split-32 gather: build x from two 32-bit halves to avoid costly
+       64-bit shift emulation on Apple Silicon's 32-bit ALUs.
+       Note: ub[i]>>k is inherently 64-bit since ub is ulong, but we
+       save by accumulating into 32-bit halves for the << i shift. */
+    uint x_lo = 0u;
+    uint x_hi = 0u;
+    for (uint i = 0; i < 32; ++i)
+      x_lo += (uint)((ub[i] >> k) & 1ul) << i;
+    for (uint i = 32; i < 64; ++i)
+      x_hi += (uint)((ub[i] >> k) & 1ul) << (i - 32u);
+    ulong x = (ulong)x_lo | ((ulong)x_hi << 32u);
     uint m = min(n, bits);
     bits -= m;
     x = zfp_writer_write_bits(w, x, m);
@@ -2464,9 +3108,19 @@ static inline void zfp_decode_block_3d_int64(device const ulong* stream, uint ma
         break;
       }
     }
-    for (uint i = 0; i < 64; ++i) {
-      ub[i] += (ulong)(x & 1ul) << k;
-      x >>= 1u;
+    /* Split-32 scatter: use 32-bit shifts on x to avoid costly 64-bit
+       shift emulation on Apple Silicon's 32-bit ALUs.
+       Note: ub[i] is ulong so the <<k accumulation is inherently 64-bit,
+       but we still save by iterating x in 32-bit halves. */
+    uint x_lo = (uint)(x & 0xFFFFFFFFul);
+    uint x_hi = (uint)(x >> 32u);
+    for (uint i = 0; i < 32; ++i) {
+      ub[i] += (ulong)(x_lo & 1u) << k;
+      x_lo >>= 1u;
+    }
+    for (uint i = 32; i < 64; ++i) {
+      ub[i] += (ulong)(x_hi & 1u) << k;
+      x_hi >>= 1u;
     }
   }
 

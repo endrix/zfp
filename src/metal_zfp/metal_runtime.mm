@@ -4,10 +4,46 @@
 #import <Foundation/Foundation.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
 
 #include "metal_runtime.h"
+
+/* GPU profiling: set ZFP_METAL_PROFILE=1 to print per-dispatch GPU timing.
+   Uses MTLCommandBuffer GPUStartTime/GPUEndTime for precise GPU-side
+   measurement, excluding all CPU-side dispatch/buffer overhead. */
+static int zfp_metal_profile_enabled = -1; /* -1 = not checked yet */
+static inline int zfp_metal_profile(void) {
+  if (zfp_metal_profile_enabled < 0) {
+    const char* env = getenv("ZFP_METAL_PROFILE");
+    zfp_metal_profile_enabled = env ? atoi(env) : 0;
+  }
+  return zfp_metal_profile_enabled;
+}
+static int zfp_metal_pso_info_printed = 0;
+static inline void zfp_metal_report_gpu_time(id<MTLCommandBuffer> cb,
+                                              const char* label,
+                                              unsigned int total_blocks,
+                                              size_t data_bytes) {
+  if (!zfp_metal_profile())
+    return;
+  double gpu_s = cb.GPUEndTime - cb.GPUStartTime;
+  double gb_s = (data_bytes > 0 && gpu_s > 0.0)
+    ? ((double)data_bytes / (1024.0*1024.0*1024.0)) / gpu_s : 0.0;
+  fprintf(stderr, "[Metal GPU] %-40s  blocks=%6u  gpu=%.6f s  %.2f GB/s\n",
+          label, total_blocks, gpu_s, gb_s);
+}
+static inline void zfp_metal_report_pso_info(id<MTLComputePipelineState> pso,
+                                              const char* label) {
+  if (zfp_metal_profile() < 2 || zfp_metal_pso_info_printed)
+    return;
+  fprintf(stderr, "[Metal PSO] %-40s  maxThreads=%lu  simdWidth=%lu  staticMem=%lu\n",
+          label,
+          (unsigned long)pso.maxTotalThreadsPerThreadgroup,
+          (unsigned long)pso.threadExecutionWidth,
+          (unsigned long)pso.staticThreadgroupMemoryLength);
+}
 
 typedef struct ZfpMetalLayoutParams {
   unsigned int nx;
@@ -103,6 +139,15 @@ typedef struct ZfpMetalContext {
   id<MTLComputePipelineState> decode2d_int64_ps;
   id<MTLComputePipelineState> encode3d_int64_ps;
   id<MTLComputePipelineState> decode3d_int64_ps;
+  /* Diagnostic PSOs for profiling */
+  id<MTLComputePipelineState> diag_bitplane_only_3d_ps;
+  id<MTLComputePipelineState> diag_transform_only_3d_ps;
+  id<MTLComputePipelineState> diag_memcopy_3d_ps;
+  id<MTLComputePipelineState> diag_bitplane_devub_3d_ps;
+  id<MTLComputePipelineState> diag_bitread_only_3d_ps;
+  id<MTLComputePipelineState> diag_bitplane_tgub_3d_ps;
+  id<MTLComputePipelineState> diag_bitplane_split32_3d_ps;
+  id<MTLComputePipelineState> decode3d_float_tgub_ps;
   id<MTLBuffer> src_buf;
   id<MTLBuffer> dst_buf;
   id<MTLBuffer> params_buf;
@@ -295,6 +340,27 @@ zfp_metal_init_context()
     }
   }
 
+  /* Diagnostic profiling PSOs (optional, loaded only when ZFP_METAL_PROFILE) */
+  if (zfp_metal_profile()) {
+    struct { const char* name; id<MTLComputePipelineState>* ps; } diag_kernels[] = {
+      { "zfp_diag_bitplane_only_3d",  &zfp_metal_ctx.diag_bitplane_only_3d_ps },
+      { "zfp_diag_transform_only_3d", &zfp_metal_ctx.diag_transform_only_3d_ps },
+      { "zfp_diag_memcopy_3d",        &zfp_metal_ctx.diag_memcopy_3d_ps },
+      { "zfp_diag_bitplane_devub_3d", &zfp_metal_ctx.diag_bitplane_devub_3d_ps },
+      { "zfp_diag_bitread_only_3d",   &zfp_metal_ctx.diag_bitread_only_3d_ps },
+      { "zfp_diag_bitplane_tgub_3d",  &zfp_metal_ctx.diag_bitplane_tgub_3d_ps },
+      { "zfp_diag_bitplane_split32_3d", &zfp_metal_ctx.diag_bitplane_split32_3d_ps },
+      { "zfp_decode3d_float_tgub",    &zfp_metal_ctx.decode3d_float_tgub_ps },
+    };
+    for (size_t i = 0; i < sizeof(diag_kernels) / sizeof(diag_kernels[0]); ++i) {
+      id<MTLFunction> fn = [lib newFunctionWithName:
+        [NSString stringWithUTF8String:diag_kernels[i].name]];
+      if (fn)
+        *(diag_kernels[i].ps) = [zfp_metal_ctx.device
+          newComputePipelineStateWithFunction:fn error:&err];
+    }
+  }
+
   if (!zfp_metal_ensure_buffer(zfp_metal_ctx.device, &zfp_metal_ctx.params_buf, &zfp_metal_ctx.params_cap, sizeof(ZfpMetalLayoutParams))) {
     zfp_metal_log_error_once("params buffer allocation", nil);
     return 0;
@@ -396,6 +462,9 @@ zfp_metal_launch_codec1d(id<MTLComputePipelineState> pso,
   [enc endEncoding];
   [cb commit];
   [cb waitUntilCompleted];
+  zfp_metal_report_gpu_time(cb, fill_dst_bytes ? "encode1d" : "decode1d",
+                            params->total_blocks,
+                            (size_t)params->total_blocks * 4u * sizeof(float));
   return [cb status] == MTLCommandBufferStatusCompleted;
 }
 
@@ -1310,6 +1379,9 @@ zfp_metal_launch_codec2d(id<MTLComputePipelineState> pso,
   [enc endEncoding];
   [cb commit];
   [cb waitUntilCompleted];
+  zfp_metal_report_gpu_time(cb, fill_dst_bytes ? "encode2d" : "decode2d",
+                            params->total_blocks,
+                            (size_t)params->total_blocks * 16u * sizeof(float));
   return [cb status] == MTLCommandBufferStatusCompleted;
 }
 
@@ -1342,6 +1414,7 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
 
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
   [enc setComputePipelineState:pso];
+  zfp_metal_report_pso_info(pso, "codec3d");
   [enc setBuffer:src_buf offset:src_offset_bytes atIndex:0];
   [enc setBuffer:dst_buf offset:dst_offset_bytes atIndex:1];
   [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
@@ -1361,7 +1434,118 @@ zfp_metal_launch_codec3d(id<MTLComputePipelineState> pso,
   [enc endEncoding];
   [cb commit];
   [cb waitUntilCompleted];
+  zfp_metal_report_gpu_time(cb, fill_dst_bytes ? "encode3d" : "decode3d",
+                            params->total_blocks,
+                            (size_t)params->total_blocks * 64u * sizeof(float));
   return [cb status] == MTLCommandBufferStatusCompleted;
+}
+
+/* Diagnostic: run bitplane-only, transform-only, and memcopy kernels on the
+   same data to isolate cost breakdown. Called once per process when
+   ZFP_METAL_PROFILE >= 3. */
+static int zfp_metal_diag_3d_done = 0;
+static void
+zfp_metal_run_diagnostic_3d(id<MTLBuffer> stream_buf,
+                             const ZfpMetalCodec3dParams* params)
+{
+  if (zfp_metal_diag_3d_done || zfp_metal_profile() < 3)
+    return;
+  zfp_metal_diag_3d_done = 1;
+
+  unsigned int total = params->total_blocks;
+  size_t data_bytes = (size_t)total * 64u * sizeof(float);
+
+  /* Temp buffer for uint intermediate (64 uints per block) */
+  id<MTLBuffer> tmp_buf = [zfp_metal_ctx.device newBufferWithLength:data_bytes
+                                                            options:MTLResourceStorageModeShared];
+  if (!tmp_buf) {
+    fprintf(stderr, "[Metal Diag] Failed to allocate temp buffer (%zu bytes)\n", data_bytes);
+    return;
+  }
+
+  /* Dedicated output buffer so diagnostics never corrupt caller's data */
+  id<MTLBuffer> diag_out_buf = [zfp_metal_ctx.device newBufferWithLength:data_bytes
+                                                                 options:MTLResourceStorageModeShared];
+  if (!diag_out_buf) {
+    fprintf(stderr, "[Metal Diag] Failed to allocate diag output buffer (%zu bytes)\n", data_bytes);
+    return;
+  }
+
+  struct { const char* name; id<MTLComputePipelineState> pso;
+           id<MTLBuffer> src; id<MTLBuffer> dst; NSUInteger tg_per_thread; } tests[] = {
+    { "diag:memcopy_3d",        zfp_metal_ctx.diag_memcopy_3d_ps,        tmp_buf, diag_out_buf, 0 },
+    { "diag:transform_only_3d", zfp_metal_ctx.diag_transform_only_3d_ps, tmp_buf, diag_out_buf, 0 },
+    { "diag:bitplane_only_3d",  zfp_metal_ctx.diag_bitplane_only_3d_ps,  stream_buf, tmp_buf, 0 },
+    { "diag:bitplane_devub_3d", zfp_metal_ctx.diag_bitplane_devub_3d_ps, stream_buf, tmp_buf, 0 },
+    { "diag:bitread_only_3d",   zfp_metal_ctx.diag_bitread_only_3d_ps,   stream_buf, tmp_buf, 0 },
+    { "diag:bitplane_tgub_3d",  zfp_metal_ctx.diag_bitplane_tgub_3d_ps,  stream_buf, tmp_buf, 256 },
+    { "diag:bitplane_split32",  zfp_metal_ctx.diag_bitplane_split32_3d_ps, stream_buf, tmp_buf, 0 },
+    { "diag:full_decode_tgub",  zfp_metal_ctx.decode3d_float_tgub_ps,    stream_buf, diag_out_buf, 256 },
+    { "diag:full_decode_3d",    zfp_metal_ctx.decode3d_float_ps,         stream_buf, diag_out_buf, 0 },
+  };
+
+  fprintf(stderr, "[Metal Diag] Running diagnostic kernels (3D, %u blocks, %.1f MB)\n",
+          total, (double)data_bytes / (1024.0*1024.0));
+
+  /* Copy params */
+  memcpy([zfp_metal_ctx.params_buf contents], params, sizeof(ZfpMetalCodec3dParams));
+
+  int num_tests = sizeof(tests) / sizeof(tests[0]);
+  for (int t = 0; t < num_tests; ++t) {
+    if (!tests[t].pso) {
+      fprintf(stderr, "[Metal Diag] %-30s  SKIPPED (no PSO)\n", tests[t].name);
+      continue;
+    }
+    /* Warm up */
+    for (int w = 0; w < 2; ++w) {
+      id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:tests[t].pso];
+      [enc setBuffer:tests[t].src offset:0 atIndex:0];
+      [enc setBuffer:tests[t].dst offset:0 atIndex:1];
+      [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+      NSUInteger width = tests[t].pso.threadExecutionWidth ?: 64;
+      NSUInteger gs = width * 2u;
+      NSUInteger maxt = tests[t].pso.maxTotalThreadsPerThreadgroup;
+      if (maxt && gs > maxt) gs = maxt;
+      if (tests[t].tg_per_thread > 0)
+        [enc setThreadgroupMemoryLength:gs * tests[t].tg_per_thread atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(total, 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(gs, 1, 1)];
+      [enc endEncoding];
+      [cb commit];
+      [cb waitUntilCompleted];
+    }
+    /* Measure (5 runs, report min) */
+    double best = 1e30;
+    for (int r = 0; r < 5; ++r) {
+      id<MTLCommandBuffer> cb = [zfp_metal_ctx.queue commandBuffer];
+      id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+      [enc setComputePipelineState:tests[t].pso];
+      [enc setBuffer:tests[t].src offset:0 atIndex:0];
+      [enc setBuffer:tests[t].dst offset:0 atIndex:1];
+      [enc setBuffer:zfp_metal_ctx.params_buf offset:0 atIndex:2];
+      NSUInteger width = tests[t].pso.threadExecutionWidth ?: 64;
+      NSUInteger gs = width * 2u;
+      NSUInteger maxt = tests[t].pso.maxTotalThreadsPerThreadgroup;
+      if (maxt && gs > maxt) gs = maxt;
+      if (tests[t].tg_per_thread > 0)
+        [enc setThreadgroupMemoryLength:gs * tests[t].tg_per_thread atIndex:0];
+      [enc dispatchThreads:MTLSizeMake(total, 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(gs, 1, 1)];
+      [enc endEncoding];
+      [cb commit];
+      [cb waitUntilCompleted];
+      double gpu_s = cb.GPUEndTime - cb.GPUStartTime;
+      if (gpu_s < best) best = gpu_s;
+    }
+    double gb_s = (data_bytes > 0 && best > 0.0)
+      ? ((double)data_bytes / (1024.0*1024.0*1024.0)) / best : 0.0;
+    fprintf(stderr, "[Metal Diag] %-30s  gpu=%.6f s  %.2f GB/s  maxThr=%lu\n",
+            tests[t].name, best, gb_s,
+            (unsigned long)tests[t].pso.maxTotalThreadsPerThreadgroup);
+  }
+  fprintf(stderr, "[Metal Diag] Done.\n");
 }
 
 extern "C" size_t
@@ -1530,6 +1714,9 @@ zfp_metal_encode3d_float_runtime(const float* src,
   if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_encode_pso(maxbits), src_buf, dst_buf, &params, stream_bytes, data_offset_bytes, 0))
     return 0;
 
+  /* Run diagnostic breakdown after first encode (uses compressed output) */
+  zfp_metal_run_diagnostic_3d(dst_buf, &params);
+
   return stream_bytes;
 }
 
@@ -1587,6 +1774,9 @@ zfp_metal_decode3d_float_runtime(const void* stream_words,
 
   if (!zfp_metal_launch_codec3d(zfp_metal_select_3d_decode_pso(maxbits), src_buf, dst_buf, &params, 0, 0, data_offset_bytes))
     return 0;
+
+  /* Run diagnostic breakdown if ZFP_METAL_PROFILE >= 3 (first call only) */
+  zfp_metal_run_diagnostic_3d(src_buf, &params);
 
   return stream_bytes;
 }
